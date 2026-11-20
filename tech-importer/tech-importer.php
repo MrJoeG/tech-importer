@@ -26,6 +26,9 @@ class Tech_Importer {
 	}
 
 	private function remote_info() {
+		if ( is_admin() && ! empty( $_GET['force-check'] ) ) {
+			delete_transient( 'tech_importer_update' );
+		}
 		$info = get_transient( 'tech_importer_update' );
 		if ( false === $info ) {
 			$res  = wp_remote_get( self::UPDATE_URL . '?t=' . time(), array( 'timeout' => 10 ) );
