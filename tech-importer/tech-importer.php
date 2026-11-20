@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image.
- * Version: 1.0.3
+ * Version: 1.0.4
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.3';
+	const VERSION    = '1.0.4';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -90,9 +90,13 @@ class Tech_Importer {
 		echo '<div class="wrap"><h1>Tech Importer</h1>';
 		echo '<p>Upload the zip from Claude. Everything comes in as a <strong>draft</strong>. Nothing is published.</p>';
 
-		if ( isset( $_POST['tech_remove'] ) ) {
+		if ( isset( $_POST['tech_remove'] ) || isset( $_POST['tech_publish'] ) ) {
 			check_admin_referer( 'tech_remove_item' );
-			$this->remove_item( (int) $_POST['tech_remove'] );
+			if ( isset( $_POST['tech_publish'] ) ) {
+				$this->publish_item( (int) $_POST['tech_publish'] );
+			} else {
+				$this->remove_item( (int) $_POST['tech_remove'] );
+			}
 			echo '<ul style="font-size:14px;line-height:1.8">';
 			foreach ( $this->log as $row ) {
 				$color = 'ok' === $row[0] ? '#1a7f37' : '#cf222e';
@@ -154,7 +158,7 @@ class Tech_Importer {
 			echo '<p>Nothing imported yet.</p>';
 			return;
 		}
-		echo '<p>Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
+		echo '<p>Publish puts the draft live and clears the WP Rocket cache. Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
 		echo '<table class="widefat striped" style="max-width:900px"><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Images</th><th></th></tr></thead><tbody>';
 		foreach ( $ids as $id ) {
 			$p = get_post( $id );
@@ -167,9 +171,11 @@ class Tech_Importer {
 			if ( 'publish' === $p->post_status ) {
 				echo '<em>Live</em>';
 			} else {
-				echo '<form method="post" style="margin:0" onsubmit="return confirm(\'Remove this draft and its ' . (int) $imgs . ' images for good?\');">';
+				echo '<form method="post" style="margin:0;display:flex;gap:8px;align-items:center">';
 				wp_nonce_field( 'tech_remove_item' );
-				echo '<button class="button button-link-delete" name="tech_remove" value="' . (int) $id . '">Remove</button></form>';
+				echo '<a class="button" href="' . esc_url( get_preview_post_link( $id ) ) . '" target="_blank">Preview</a>';
+				echo '<button class="button button-primary" name="tech_publish" value="' . (int) $id . '" onclick="return confirm(\'Publish this now? It goes live on your site.\');">Publish</button>';
+				echo '<button class="button button-link-delete" name="tech_remove" value="' . (int) $id . '" onclick="return confirm(\'Remove this draft and its ' . (int) $imgs . ' images for good?\');">Remove</button></form>';
 			}
 			echo '</td></tr>';
 		}
@@ -348,6 +354,70 @@ class Tech_Importer {
 		}
 	}
 
+	private function plain_html( $elements ) {
+		$out = '';
+		foreach ( (array) $elements as $el ) {
+			if ( ! is_array( $el ) ) {
+				continue;
+			}
+			$st = isset( $el['settings'] ) && is_array( $el['settings'] ) ? $el['settings'] : array();
+			if ( ! empty( $st['hide_desktop'] ) && ! empty( $st['hide_tablet'] ) && ! empty( $st['hide_mobile'] ) ) {
+				continue;
+			}
+			$w = isset( $el['widgetType'] ) ? $el['widgetType'] : '';
+			if ( 'heading' === $w && ! empty( $st['title'] ) ) {
+				$tag  = ( ! empty( $st['header_size'] ) && preg_match( '/^h[1-6]$/', $st['header_size'] ) ) ? $st['header_size'] : 'h2';
+				$out .= '<' . $tag . '>' . $st['title'] . '</' . $tag . ">\n";
+			} elseif ( 'text-editor' === $w && ! empty( $st['editor'] ) ) {
+				$out .= $st['editor'] . "\n";
+			} elseif ( 'image' === $w && ! empty( $st['image']['url'] ) ) {
+				$alt  = ! empty( $st['image']['id'] ) ? get_post_meta( $st['image']['id'], '_wp_attachment_image_alt', true ) : '';
+				$alt  = $alt ? $alt : ( isset( $st['image']['alt'] ) ? $st['image']['alt'] : '' );
+				$out .= '<img src="' . esc_url( $st['image']['url'] ) . '" alt="' . esc_attr( $alt ) . "\">\n";
+			} elseif ( 'button' === $w && ! empty( $st['text'] ) ) {
+				$url  = isset( $st['link']['url'] ) ? $st['link']['url'] : '';
+				$out .= '<p><a href="' . esc_url( $url ) . '">' . esc_html( $st['text'] ) . "</a></p>\n";
+			} elseif ( 'icon-box' === $w ) {
+				$out .= '<h3>' . ( isset( $st['title_text'] ) ? $st['title_text'] : '' ) . '</h3><p>' . ( isset( $st['description_text'] ) ? $st['description_text'] : '' ) . "</p>\n";
+			} elseif ( 'icon-list' === $w && ! empty( $st['icon_list'] ) ) {
+				$out .= '<ul>';
+				foreach ( $st['icon_list'] as $li ) {
+					$out .= '<li>' . ( isset( $li['text'] ) ? $li['text'] : '' ) . '</li>';
+				}
+				$out .= "</ul>\n";
+			} elseif ( in_array( $w, array( 'accordion', 'toggle', 'tabs' ), true ) && ! empty( $st['tabs'] ) ) {
+				foreach ( $st['tabs'] as $t ) {
+					$out .= '<h3>' . ( isset( $t['tab_title'] ) ? $t['tab_title'] : '' ) . '</h3>' . ( isset( $t['tab_content'] ) ? $t['tab_content'] : '' ) . "\n";
+				}
+			}
+			if ( ! empty( $el['elements'] ) ) {
+				$out .= $this->plain_html( $el['elements'] );
+			}
+		}
+		return $out;
+	}
+
+	private function publish_item( $id ) {
+		$p = get_post( $id );
+		if ( ! $p || ! in_array( $id, $this->imported_ids(), true ) || ! current_user_can( 'publish_post', $id ) ) {
+			$this->note( 'err', 'That item was not found or you cannot publish it.' );
+			return;
+		}
+		$res = wp_update_post( array( 'ID' => $id, 'post_status' => 'publish' ), true );
+		if ( is_wp_error( $res ) ) {
+			$this->note( 'err', 'Could not publish: ' . esc_html( $res->get_error_message() ) );
+			return;
+		}
+		if ( class_exists( '\Elementor\Plugin' ) ) {
+			\Elementor\Plugin::$instance->files_manager->clear_cache();
+		}
+		if ( function_exists( 'rocket_clean_domain' ) ) {
+			rocket_clean_domain();
+		}
+		$url = get_permalink( $id );
+		$this->note( 'ok', 'Published: <a href="' . esc_url( $url ) . '" target="_blank">' . esc_html( $url ) . '</a> (WP Rocket cache cleared). Next: request indexing in Search Console and scrape it in the Facebook Sharing Debugger.' );
+	}
+
 	private function import_item( $item, $root, $update ) {
 		$type  = ( isset( $item['type'] ) && 'post' === $item['type'] ) ? 'post' : 'page';
 		$title = isset( $item['title'] ) ? $item['title'] : 'Untitled';
@@ -384,6 +454,7 @@ class Tech_Importer {
 			}
 			$content = isset( $tpl['content'] ) ? $tpl['content'] : $tpl;
 			$this->fill_images( $content, $media );
+			$item['content'] = $this->plain_html( $content );
 			$json = wp_json_encode( $content );
 			$json = str_replace(
 				'https:\/\/staging.capitaloftechs.com\/wp\/wp-content\/uploads\/',
