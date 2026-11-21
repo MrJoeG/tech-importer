@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.10
+ * Version: 1.0.11
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.10';
+	const VERSION    = '1.0.11';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -129,6 +129,8 @@ class Tech_Importer {
 				return;
 			}
 		} else {
+			// Always ask GitHub fresh on this screen, so a new release shows right away.
+			delete_transient( 'tech_importer_update' );
 			$this->remote_info();
 		}
 		$st     = get_option( 'tech_importer_update_status', array() );
