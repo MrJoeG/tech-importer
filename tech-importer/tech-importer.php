@@ -1,8 +1,8 @@
 <?php
 /**
  * Plugin Name: Tech Importer
- * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image.
- * Version: 1.0.4
+ * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
+ * Version: 1.0.5
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.4';
+	const VERSION    = '1.0.5';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -109,6 +109,20 @@ class Tech_Importer {
 			$this->log = array();
 		}
 
+		if ( isset( $_POST['tech_apply_changes'] ) || isset( $_POST['tech_undo'] ) || isset( $_POST['tech_discard_changes'] ) ) {
+			check_admin_referer( 'tech_changes' );
+			if ( isset( $_POST['tech_undo'] ) ) {
+				$this->undo_change( sanitize_key( $_POST['tech_undo'] ) );
+			} elseif ( isset( $_POST['tech_discard_changes'] ) ) {
+				delete_option( 'tech_pending_changes' );
+				$this->note( 'ok', 'Pending updates discarded. Nothing was changed.' );
+			} else {
+				$picked = isset( $_POST['tech_change'] ) ? array_map( 'sanitize_key', (array) $_POST['tech_change'] ) : array();
+				$this->apply_changes( $picked );
+			}
+			$this->print_log();
+		}
+
 		if ( isset( $_POST['cot_import'] ) ) {
 			check_admin_referer( 'cot_import_zip' );
 			$this->handle_upload();
@@ -126,8 +140,19 @@ class Tech_Importer {
 		echo '<p><label><input type="checkbox" name="cot_update" value="1"> Update existing pages or posts with the same slug (otherwise they are skipped)</label></p>';
 		submit_button( 'Import', 'primary', 'cot_import' );
 		echo '</form>';
+		$this->list_changes();
 		$this->list_imports();
 		echo '</div>';
+	}
+
+	private function print_log() {
+		echo '<h2>Results</h2><ul style="font-size:14px;line-height:1.8">';
+		foreach ( $this->log as $row ) {
+			$color = 'ok' === $row[0] ? '#1a7f37' : ( 'warn' === $row[0] ? '#9a6700' : '#cf222e' );
+			echo '<li style="color:' . esc_attr( $color ) . '">' . wp_kses_post( $row[1] ) . '</li>';
+		}
+		echo '</ul><hr>';
+		$this->log = array();
 	}
 
 	private function imported_ids() {
@@ -243,15 +268,18 @@ class Tech_Importer {
 			return;
 		}
 		$manifest = json_decode( file_get_contents( $root . '/manifest.json' ), true );
-		if ( ! is_array( $manifest ) || empty( $manifest['items'] ) ) {
+		if ( ! is_array( $manifest ) || ( empty( $manifest['items'] ) && empty( $manifest['changes'] ) ) ) {
 			$this->note( 'err', 'manifest.json is empty or not valid JSON.' );
 			$this->cleanup( $dir );
 			return;
 		}
 
 		$update = ! empty( $_POST['cot_update'] );
-		foreach ( $manifest['items'] as $item ) {
+		foreach ( ! empty( $manifest['items'] ) ? $manifest['items'] : array() as $item ) {
 			$this->import_item( $item, $root, $update );
+		}
+		if ( ! empty( $manifest['changes'] ) && is_array( $manifest['changes'] ) ) {
+			$this->queue_changes( $manifest['changes'], isset( $manifest['name'] ) ? $manifest['name'] : '' );
 		}
 		if ( class_exists( '\Elementor\Plugin' ) ) {
 			\Elementor\Plugin::$instance->files_manager->clear_cache();
@@ -558,6 +586,506 @@ class Tech_Importer {
 			'ok',
 			'<strong>Draft ready:</strong> ' . esc_html( $title ) . ' (' . $type . ', /' . esc_html( $slug ) . '/) &nbsp; <a href="' . esc_url( $prev ) . '" target="_blank">Preview</a> &middot; <a href="' . esc_url( $edit ) . '" target="_blank">Edit with Elementor</a> &middot; <a href="' . esc_url( get_edit_post_link( $id ) ) . '" target="_blank">Edit in WordPress</a>'
 		);
+	}
+	/* ---------- Content updates (1.0.5) ---------- */
+
+	private function text_fields() {
+		return array( 'editor', 'title', 'title_text', 'description_text', 'tab_content', 'tab_title', 'text', 'description', 'testimonial_content' );
+	}
+
+	private function html_fields() {
+		return array( 'editor', 'description_text', 'tab_content', 'description', 'testimonial_content' );
+	}
+
+	private function find_target( $ref ) {
+		$ref = trim( (string) $ref, '/ ' );
+		if ( '' === $ref || 'home' === $ref ) {
+			$id = (int) get_option( 'page_on_front' );
+			return $id ? get_post( $id ) : null;
+		}
+		foreach ( array( 'page', 'post' ) as $t ) {
+			$p = get_page_by_path( $ref, OBJECT, $t );
+			if ( $p ) {
+				return $p;
+			}
+		}
+		return null;
+	}
+
+	private function queue_changes( $changes, $batch ) {
+		$pending = get_option( 'tech_pending_changes', array() );
+		$n       = 0;
+		foreach ( $changes as $c ) {
+			if ( ! is_array( $c ) || empty( $c['page'] ) || empty( $c['find'] ) ) {
+				$this->note( 'err', 'An update in the zip is missing its page or text, skipped.' );
+				continue;
+			}
+			$type = ( isset( $c['type'] ) && 'replace' === $c['type'] ) ? 'replace' : 'link';
+			$row  = array(
+				'id'      => substr( md5( wp_json_encode( $c ) . microtime() . $n ), 0, 10 ),
+				'batch'   => sanitize_text_field( $batch ),
+				'type'    => $type,
+				'page'    => sanitize_text_field( $c['page'] ),
+				'find'    => (string) $c['find'],
+				'url'     => isset( $c['url'] ) ? esc_url_raw( $c['url'] ) : '',
+				'replace' => isset( $c['replace'] ) ? wp_kses_post( $c['replace'] ) : '',
+				'note'    => isset( $c['note'] ) ? sanitize_text_field( $c['note'] ) : '',
+				'paste'   => isset( $c['paste'] ) ? wp_kses_post( $c['paste'] ) : '',
+			);
+			if ( 'link' === $type && '' === $row['url'] ) {
+				$this->note( 'err', 'Link update for "' . esc_html( $row['find'] ) . '" has no URL, skipped.' );
+				continue;
+			}
+			$pending[ $row['id'] ] = $row;
+			$n++;
+		}
+		update_option( 'tech_pending_changes', $pending, false );
+		if ( $n ) {
+			$this->note( 'ok', '<strong>' . $n . ' page updates are waiting for your review</strong> in "Updates to existing pages" below. Nothing has changed yet.' );
+		}
+	}
+
+	/* Link the first match of $phrase in HTML text that is not already inside a link or a tag. */
+	private function link_html( $html, $phrase, $url, &$found ) {
+		$parts = preg_split( '/(<[^>]*>)/', $html, -1, PREG_SPLIT_DELIM_CAPTURE );
+		$depth = 0;
+		$done  = false;
+		$rx    = '/(?<![\p{L}\p{N}])' . preg_quote( $phrase, '/' ) . '(?![\p{L}\p{N}])/iu';
+		foreach ( $parts as $i => $part ) {
+			if ( '' !== $part && '<' === $part[0] ) {
+				if ( preg_match( '/^<a[\s>]/i', $part ) ) {
+					$depth++;
+				} elseif ( preg_match( '/^<\/a\s*>/i', $part ) ) {
+					$depth = max( 0, $depth - 1 );
+				}
+				continue;
+			}
+			if ( $depth > 0 ) {
+				continue;
+			}
+			$cnt = preg_match_all( $rx, $part );
+			if ( ! $cnt ) {
+				continue;
+			}
+			$found += $cnt;
+			if ( ! $done ) {
+				$parts[ $i ] = preg_replace_callback( $rx, function ( $m ) use ( $url ) {
+					return '<a href="' . esc_url( $url ) . '">' . $m[0] . '</a>';
+				}, $part, 1 );
+				$done = true;
+			}
+		}
+		return $done ? implode( '', $parts ) : $html;
+	}
+
+	/* Walk Elementor elements and apply one change. Returns number of places changed, fills $where with a before/after sample. */
+	private function apply_to_elements( &$elements, $c, &$where, &$found ) {
+		$changed = 0;
+		foreach ( $elements as &$el ) {
+			if ( ! is_array( $el ) ) {
+				continue;
+			}
+			if ( ! empty( $el['settings'] ) && is_array( $el['settings'] ) ) {
+				$changed += $this->apply_to_settings( $el['settings'], $c, $where, $found, isset( $el['widgetType'] ) ? $el['widgetType'] : '', $changed );
+			}
+			if ( ! empty( $el['elements'] ) ) {
+				$changed += $this->apply_to_elements( $el['elements'], $c, $where, $found );
+			}
+			if ( 'link' === $c['type'] && $changed ) {
+				return $changed;
+			}
+		}
+		return $changed;
+	}
+
+	private function apply_to_settings( &$st, $c, &$where, &$found, $widget, $already ) {
+		$changed = 0;
+		foreach ( $st as $key => &$val ) {
+			if ( is_array( $val ) ) {
+				foreach ( $val as &$row ) {
+					if ( is_array( $row ) ) {
+						$changed += $this->apply_to_settings( $row, $c, $where, $found, $widget, $already + $changed );
+					}
+				}
+				unset( $row );
+				continue;
+			}
+			if ( ! is_string( $val ) || ! in_array( $key, $this->text_fields(), true ) ) {
+				continue;
+			}
+			if ( 'link' === $c['type'] ) {
+				if ( $already + $changed > 0 || ! in_array( $key, $this->html_fields(), true ) ) {
+					if ( preg_match( '/(?<![\p{L}\p{N}])' . preg_quote( $c['find'], '/' ) . '(?![\p{L}\p{N}])/iu', wp_strip_all_tags( $val ) ) ) {
+						$found++;
+					}
+					continue;
+				}
+				$f   = 0;
+				$new = $this->link_html( $val, $c['find'], $c['url'], $f );
+				$found += $f;
+				if ( $new !== $val ) {
+					$where = array( $widget . ' / ' . $key, $val, $new );
+					$val   = $new;
+					$changed++;
+				}
+			} else {
+				$cnt = substr_count( $val, $c['find'] );
+				if ( $cnt ) {
+					$found += $cnt;
+					$new    = str_replace( $c['find'], $c['replace'], $val );
+					$where  = array( $widget . ' / ' . $key, $val, $new );
+					$val    = $new;
+					$changed += $cnt;
+				}
+			}
+		}
+		unset( $val );
+		return $changed;
+	}
+
+	private function get_layout( $post ) {
+		$raw = get_post_meta( $post->ID, '_elementor_data', true );
+		if ( ! $raw ) {
+			return null;
+		}
+		$data = is_array( $raw ) ? $raw : json_decode( $raw, true );
+		return is_array( $data ) ? $data : null;
+	}
+
+	/* Dry run: what would this change do? */
+	private function check_change( $c ) {
+		$post = $this->find_target( $c['page'] );
+		if ( ! $post ) {
+			return array( 'status' => 'err', 'msg' => 'Page /' . esc_html( $c['page'] ) . '/ not found.' );
+		}
+		$layout = $this->get_layout( $post );
+		$where  = array();
+		$found  = 0;
+		if ( $layout ) {
+			$flat = wp_json_encode( $layout, JSON_UNESCAPED_SLASHES );
+			if ( 'link' === $c['type'] && ( false !== strpos( $flat, 'href=\"' . $c['url'] . '\"' ) || false !== strpos( $flat, 'href=\"' . home_url( $c['url'] ) . '\"' ) ) ) {
+				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This page already links to ' . esc_html( $c['url'] ) . '.' );
+			}
+			$n = $this->apply_to_elements( $layout, $c, $where, $found );
+		} else {
+			$html = $post->post_content;
+			if ( 'link' === $c['type'] ) {
+				$new = $this->link_html( $html, $c['find'], $c['url'], $found );
+			} else {
+				$found = substr_count( $html, $c['find'] );
+				$new   = str_replace( $c['find'], $c['replace'], $html );
+			}
+			$n     = $new !== $html ? 1 : 0;
+			$where = $n ? array( 'page content', $html, $new ) : array();
+		}
+		if ( ! $n ) {
+			$msg = 'link' === $c['type'] ? 'The words "' . esc_html( $c['find'] ) . '" are not on this page outside a link.' : 'The text to replace was not found. It may have been edited by hand.';
+			if ( $c['paste'] ) {
+				$msg .= ' Add this by hand instead: <code>' . esc_html( $c['paste'] ) . '</code>';
+			}
+			return array( 'status' => 'err', 'post' => $post, 'msg' => $msg );
+		}
+		if ( 'replace' === $c['type'] && $found > 1 ) {
+			return array( 'status' => 'err', 'post' => $post, 'msg' => 'That text appears ' . $found . ' times on the page, so it was not changed. Claude needs to make the text more specific.' );
+		}
+		return array( 'status' => 'ready', 'post' => $post, 'where' => $where, 'layout' => $layout );
+	}
+
+	private function snippet( $before, $after ) {
+		$b = wp_strip_all_tags( $before );
+		$a = $after;
+		$p = strpos( $a, '<a href=' );
+		if ( false === $p ) {
+			$plain = wp_strip_all_tags( $a );
+			return esc_html( mb_strimwidth( $plain, 0, 260, '...' ) );
+		}
+		$start = max( 0, $p - 140 );
+		$frag  = substr( $a, $start, 420 );
+		$frag  = wp_kses( $frag, array( 'a' => array( 'href' => true ) ) );
+		$frag  = preg_replace( '/<a href="([^"]*)">/', '<a href="$1" style="background:#fff3b0;font-weight:600">', $frag, 1 );
+		return ( $start ? '...' : '' ) . $frag . '...';
+	}
+
+	private function list_changes() {
+		$pending = get_option( 'tech_pending_changes', array() );
+		$log     = get_option( 'tech_change_log', array() );
+		if ( ! $pending && ! $log ) {
+			return;
+		}
+		echo '<h2 style="margin-top:30px">Updates to existing pages</h2>';
+		if ( $pending ) {
+			echo '<p>Review each update. Nothing changes until you click <strong>Apply selected</strong>. Each page is backed up first, then checked after the change. If the check fails, the page is put back automatically.</p>';
+			echo '<form method="post">';
+			wp_nonce_field( 'tech_changes' );
+			echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th style="width:30px"></th><th>Page</th><th>Update</th><th>Preview of the change</th></tr></thead><tbody>';
+			foreach ( $pending as $c ) {
+				$r     = $this->check_change( $c );
+				$ready = 'ready' === $r['status'];
+				$title = ! empty( $r['post'] ) ? $r['post']->post_title : $c['page'];
+				$what  = 'link' === $c['type']
+					? 'Link <strong>"' . esc_html( $c['find'] ) . '"</strong> to <code>' . esc_html( $c['url'] ) . '</code>'
+					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>';
+				if ( $c['note'] ) {
+					$what .= '<br><small>' . esc_html( $c['note'] ) . '</small>';
+				}
+				echo '<tr><td>' . ( $ready ? '<input type="checkbox" name="tech_change[]" value="' . esc_attr( $c['id'] ) . '" checked>' : '' ) . '</td>';
+				echo '<td>' . esc_html( $title ) . '<br><small>/' . esc_html( trim( $c['page'], '/' ) ) . '/</small></td><td>' . $what . '</td><td>';
+				if ( $ready ) {
+					echo '<small style="color:#666">' . esc_html( $r['where'][0] ) . '</small><br>' . $this->snippet( $r['where'][1], $r['where'][2] );
+				} else {
+					$color = 'skip' === $r['status'] ? '#9a6700' : '#cf222e';
+					echo '<span style="color:' . $color . '">' . wp_kses_post( $r['msg'] ) . '</span>';
+				}
+				echo '</td></tr>';
+			}
+			echo '</tbody></table><p style="display:flex;gap:10px">';
+			echo '<button class="button button-primary" name="tech_apply_changes" value="1" onclick="return confirm(\'Apply the selected updates to your live pages?\');">Apply selected</button>';
+			echo '<button class="button" name="tech_discard_changes" value="1">Discard all</button></p></form>';
+		}
+		if ( $log ) {
+			echo '<h3>Applied updates</h3><form method="post">';
+			wp_nonce_field( 'tech_changes' );
+			echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th>When</th><th>Page</th><th>What changed</th><th>Check</th><th></th></tr></thead><tbody>';
+			foreach ( array_reverse( $log, true ) as $key => $row ) {
+				echo '<tr><td>' . esc_html( $row['time'] ) . '</td><td><a href="' . esc_url( get_permalink( $row['post'] ) ) . '" target="_blank">' . esc_html( get_the_title( $row['post'] ) ) . '</a></td>';
+				echo '<td>' . wp_kses_post( implode( '<br>', $row['what'] ) ) . '</td><td>' . wp_kses_post( $row['check'] ) . '</td><td>';
+				echo ! empty( $row['undone'] ) ? '<em>Undone</em>' : '<button class="button" name="tech_undo" value="' . esc_attr( $key ) . '" onclick="return confirm(\'Put this page back the way it was before this update?\');">Undo</button>';
+				echo '</td></tr>';
+			}
+			echo '</tbody></table></form>';
+		}
+	}
+
+	private function page_snapshot( $post_id ) {
+		$url = add_query_arg( 'tech_check', time() . wp_rand( 100, 999 ), get_permalink( $post_id ) );
+		$res = wp_remote_get( $url, array( 'timeout' => 25, 'redirection' => 3, 'headers' => array( 'Cache-Control' => 'no-cache' ) ) );
+		if ( is_wp_error( $res ) ) {
+			return array( 'ok' => false, 'err' => $res->get_error_message() );
+		}
+		$body = wp_remote_retrieve_body( $res );
+		return array(
+			'ok'    => true,
+			'code'  => (int) wp_remote_retrieve_response_code( $res ),
+			'len'   => strlen( $body ),
+			'h1'    => preg_match_all( '/<h1[\s>]/i', $body ),
+			'h2'    => preg_match_all( '/<h2[\s>]/i', $body ),
+			'imgs'  => preg_match_all( '/<img\s/i', $body ),
+			'forms' => preg_match_all( '/<form[\s>]/i', $body ),
+			'fatal' => (bool) preg_match( '/critical error|Fatal error|Parse error/i', $body ),
+			'body'  => $body,
+		);
+	}
+
+	private function count_nodes( $elements, &$ids ) {
+		$n = 0;
+		foreach ( (array) $elements as $el ) {
+			if ( is_array( $el ) ) {
+				$n++;
+				$ids[] = isset( $el['id'] ) ? $el['id'] : '';
+				if ( ! empty( $el['elements'] ) ) {
+					$n += $this->count_nodes( $el['elements'], $ids );
+				}
+			}
+		}
+		return $n;
+	}
+
+	private function tag_gap( $html, $t ) {
+		return preg_match_all( '/<' . $t . '[\s>]/i', $html ) - preg_match_all( '/<\/' . $t . '\s*>/i', $html );
+	}
+
+	/* True when the change did not open or close any tag it shouldn't have. */
+	private function tags_balanced( $before, $after ) {
+		foreach ( array( 'a', 'strong', 'em', 'b', 'p', 'ul', 'ol', 'li', 'span', 'div', 'h2', 'h3' ) as $t ) {
+			if ( $this->tag_gap( $before, $t ) !== $this->tag_gap( $after, $t ) ) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	private function clear_page_cache( $post_id ) {
+		if ( class_exists( '\Elementor\Plugin' ) ) {
+			\Elementor\Plugin::$instance->files_manager->clear_cache();
+		}
+		delete_post_meta( $post_id, '_elementor_element_cache' );
+		delete_post_meta( $post_id, '_elementor_css' );
+		if ( function_exists( 'rocket_clean_post' ) ) {
+			rocket_clean_post( $post_id );
+		}
+	}
+
+	private function save_page( $post_id, $layout, $content ) {
+		if ( null !== $layout ) {
+			update_metadata( 'post', $post_id, '_elementor_data', wp_slash( is_string( $layout ) ? $layout : wp_json_encode( $layout ) ) );
+		}
+		if ( null !== $content ) {
+			global $wpdb;
+			$wpdb->update( $wpdb->posts, array( 'post_content' => $content ), array( 'ID' => $post_id ) );
+			clean_post_cache( $post_id );
+		}
+		$this->clear_page_cache( $post_id );
+	}
+
+	private function apply_changes( $picked ) {
+		$pending = get_option( 'tech_pending_changes', array() );
+		$by_page = array();
+		foreach ( $picked as $cid ) {
+			if ( isset( $pending[ $cid ] ) ) {
+				$post = $this->find_target( $pending[ $cid ]['page'] );
+				if ( $post ) {
+					$by_page[ $post->ID ][] = $pending[ $cid ];
+				}
+			}
+		}
+		if ( ! $by_page ) {
+			$this->note( 'warn', 'No updates were selected.' );
+			return;
+		}
+		$log = get_option( 'tech_change_log', array() );
+		foreach ( $by_page as $post_id => $changes ) {
+			$post = get_post( $post_id );
+			if ( ! current_user_can( 'edit_post', $post_id ) ) {
+				$this->note( 'err', 'You cannot edit ' . esc_html( $post->post_title ) . '.' );
+				continue;
+			}
+			$old_raw     = get_post_meta( $post_id, '_elementor_data', true );
+			$old_content = $post->post_content;
+			$layout      = $this->get_layout( $post );
+			$content     = $old_content;
+			$what        = array();
+			$ids0        = array();
+			$nodes0      = $layout ? $this->count_nodes( $layout, $ids0 ) : 0;
+			$problems    = array();
+			$expect      = array();
+
+			foreach ( $changes as $c ) {
+				$where = array();
+				$found = 0;
+				if ( $layout ) {
+					$n = $this->apply_to_elements( $layout, $c, $where, $found );
+				} else {
+					$n = 0;
+				}
+				if ( 'link' === $c['type'] ) {
+					$f       = 0;
+					$content = $this->link_html( $content, $c['find'], $c['url'], $f );
+				} else {
+					$content = str_replace( $c['find'], $c['replace'], $content );
+				}
+				if ( ! $layout ) {
+					$n = 1;
+				}
+				if ( ! $n || ( 'replace' === $c['type'] && $found > 1 ) ) {
+					$problems[] = 'Could not apply "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"';
+					continue;
+				}
+				if ( $where && ! $this->tags_balanced( $where[1], $where[2] ) ) {
+					$problems[] = 'The change to "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '" would leave broken HTML';
+					continue;
+				}
+				$what[]   = 'link' === $c['type'] ? 'Linked "' . esc_html( $c['find'] ) . '" to ' . esc_html( $c['url'] ) : 'Replaced "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"';
+				if ( 'link' === $c['type'] ) {
+					$expect[] = 'href="' . esc_url( $c['url'] ) . '"';
+				} elseif ( preg_match( '/href="([^"]+)"/', $c['replace'], $hm ) ) {
+					$expect[] = 'href="' . $hm[1] . '"';
+				} else {
+					$expect[] = mb_substr( wp_strip_all_tags( $c['replace'] ), 0, 40 );
+				}
+				unset( $pending[ $c['id'] ] );
+			}
+
+			if ( $problems ) {
+				$this->note( 'err', esc_html( $post->post_title ) . ': ' . implode( '; ', $problems ) . '. This page was not changed.' );
+				foreach ( $changes as $c ) {
+					$pending[ $c['id'] ] = $c;
+				}
+				continue;
+			}
+			if ( $layout ) {
+				$ids1   = array();
+				$nodes1 = $this->count_nodes( $layout, $ids1 );
+				$json   = wp_json_encode( $layout );
+				if ( $nodes1 !== $nodes0 || $ids1 !== $ids0 || ! is_array( json_decode( $json, true ) ) ) {
+					$this->note( 'err', esc_html( $post->post_title ) . ': layout check failed (sections or widgets would change). This page was not changed.' );
+					foreach ( $changes as $c ) {
+						$pending[ $c['id'] ] = $c;
+					}
+					continue;
+				}
+			}
+
+			$before = $this->page_snapshot( $post_id );
+			$key    = 'u' . time() . $post_id;
+			update_post_meta( $post_id, '_tech_backup_' . $key, wp_slash( wp_json_encode( array( 'data' => $old_raw, 'content' => $old_content ) ) ) );
+			$this->save_page( $post_id, $layout ? $json : null, $content !== $old_content ? $content : null );
+			$after = $this->page_snapshot( $post_id );
+
+			$check = $this->verify( $before, $after, $expect );
+			if ( 'fail' === $check[0] ) {
+				$this->save_page( $post_id, $old_raw ? $old_raw : null, $old_content );
+				$this->note( 'err', esc_html( $post->post_title ) . ': the check after the update failed (' . esc_html( $check[1] ) . '), so the page was put back the way it was.' );
+				foreach ( $changes as $c ) {
+					$pending[ $c['id'] ] = $c;
+				}
+				delete_post_meta( $post_id, '_tech_backup_' . $key );
+				continue;
+			}
+			$log[ $key ] = array(
+				'time'  => current_time( 'mysql' ),
+				'post'  => $post_id,
+				'what'  => $what,
+				'check' => 'pass' === $check[0] ? '<span style="color:#1a7f37">Passed</span>' : '<span style="color:#9a6700">' . esc_html( $check[1] ) . '</span>',
+			);
+			$this->note( 'pass' === $check[0] ? 'ok' : 'warn', esc_html( $post->post_title ) . ': ' . count( $what ) . ' update(s) applied. Check: ' . esc_html( $check[1] ) . ' <a href="' . esc_url( get_permalink( $post_id ) ) . '" target="_blank">View page</a>' );
+		}
+		update_option( 'tech_pending_changes', $pending, false );
+		update_option( 'tech_change_log', array_slice( $log, -100, null, true ), false );
+	}
+
+	private function verify( $before, $after, $expect ) {
+		if ( ! $after['ok'] || ! $before['ok'] ) {
+			return array( 'warn', 'Could not load the page automatically, please open it and look it over' );
+		}
+		if ( 200 !== $after['code'] ) {
+			return array( 'fail', 'page returned error ' . $after['code'] );
+		}
+		if ( $after['fatal'] && ! $before['fatal'] ) {
+			return array( 'fail', 'page shows a PHP error' );
+		}
+		foreach ( array( 'h1' => 'H1 headings', 'h2' => 'H2 headings', 'imgs' => 'images', 'forms' => 'forms' ) as $k => $label ) {
+			if ( $after[ $k ] < $before[ $k ] ) {
+				return array( 'fail', 'fewer ' . $label . ' than before (' . $before[ $k ] . ' to ' . $after[ $k ] . ')' );
+			}
+		}
+		if ( $after['len'] < $before['len'] * 0.9 ) {
+			return array( 'fail', 'page got much shorter' );
+		}
+		foreach ( $expect as $e ) {
+			if ( false === strpos( $after['body'], $e ) ) {
+				return array( 'warn', 'Saved, but the new text is not showing yet (probably cache). Clear the WP Rocket cache and look at the page' );
+			}
+		}
+		return array( 'pass', 'page loads, headings, images and forms all still there, new content showing' );
+	}
+
+	private function undo_change( $key ) {
+		$log = get_option( 'tech_change_log', array() );
+		if ( empty( $log[ $key ] ) || ! empty( $log[ $key ]['undone'] ) ) {
+			$this->note( 'err', 'That update was not found or was already undone.' );
+			return;
+		}
+		$post_id = (int) $log[ $key ]['post'];
+		$backup  = json_decode( get_post_meta( $post_id, '_tech_backup_' . $key, true ), true );
+		if ( ! is_array( $backup ) || ! current_user_can( 'edit_post', $post_id ) ) {
+			$this->note( 'err', 'The backup for that update is missing, so it can\'t be undone here.' );
+			return;
+		}
+		$this->save_page( $post_id, ! empty( $backup['data'] ) ? $backup['data'] : null, isset( $backup['content'] ) ? $backup['content'] : null );
+		$log[ $key ]['undone'] = true;
+		update_option( 'tech_change_log', $log, false );
+		delete_post_meta( $post_id, '_tech_backup_' . $key );
+		$this->note( 'ok', esc_html( get_the_title( $post_id ) ) . ' is back the way it was before that update. If you edited the page in Elementor after the update, those later edits were undone too.' );
 	}
 }
 
