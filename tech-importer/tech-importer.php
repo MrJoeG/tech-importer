@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.7
+ * Version: 1.0.8
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.7';
+	const VERSION    = '1.0.8';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -50,28 +50,45 @@ class Tech_Importer {
 	}
 
 	private function update_box() {
-		if ( isset( $_POST['tech_check_updates'] ) ) {
-			check_admin_referer( 'tech_check_updates' );
+		if ( isset( $_POST['tech_update_now'] ) ) {
+			check_admin_referer( 'tech_update_now' );
 			delete_transient( 'tech_importer_update' );
-			delete_site_transient( 'update_plugins' );
+			$info = $this->remote_info();
+			if ( ! empty( $info['version'] ) && ! empty( $info['package'] ) && version_compare( $info['version'], self::VERSION, '>' ) && current_user_can( 'update_plugins' ) ) {
+				require_once ABSPATH . 'wp-admin/includes/file.php';
+				require_once ABSPATH . 'wp-admin/includes/misc.php';
+				require_once ABSPATH . 'wp-admin/includes/plugin.php';
+				require_once ABSPATH . 'wp-admin/includes/class-wp-upgrader.php';
+				$up  = new Plugin_Upgrader( new Automatic_Upgrader_Skin() );
+				$res = $up->install( $info['package'], array( 'overwrite_package' => true, 'clear_update_cache' => true ) );
+				if ( true === $res ) {
+					delete_site_transient( 'update_plugins' );
+					echo '<div class="notice notice-success"><p><strong>Tech Importer updated to ' . esc_html( $info['version'] ) . '.</strong> <a href="' . esc_url( admin_url( 'tools.php?page=' . self::SLUG ) ) . '">Reload this page</a> to use it.</p></div>';
+					return;
+				}
+				$msg = is_wp_error( $res ) ? $res->get_error_message() : 'the update could not be installed';
+				echo '<div class="notice notice-error"><p>Update failed: ' . esc_html( $msg ) . '. You can still upload the zip by hand under Plugins &gt; Add New &gt; Upload Plugin.</p></div>';
+				return;
+			}
+		} else {
 			$this->remote_info();
-			wp_update_plugins();
 		}
 		$st     = get_option( 'tech_importer_update_status', array() );
-		$latest = ! empty( $st['version'] ) ? $st['version'] : 'unknown';
-		echo '<div style="background:#fff;border:1px solid #c3c4c7;border-left:4px solid #FF7033;padding:10px 14px;max-width:1100px;margin:14px 0">';
-		echo '<strong>Version ' . esc_html( self::VERSION ) . '</strong> installed. Latest on GitHub: <strong>' . esc_html( $latest ) . '</strong>';
-		if ( ! empty( $st['time'] ) ) {
-			echo ' <small>(checked ' . esc_html( $st['time'] ) . ')</small>';
+		$latest = ! empty( $st['version'] ) ? $st['version'] : '';
+		$newer  = $latest && version_compare( $latest, self::VERSION, '>' );
+		if ( ! $newer && empty( $st['error'] ) ) {
+			return;
 		}
-		if ( ! empty( $st['error'] ) ) {
-			echo '<br><span style="color:#cf222e">Last check failed: ' . esc_html( $st['error'] ) . '</span>';
-		} elseif ( 'unknown' !== $latest && version_compare( $latest, self::VERSION, '>' ) ) {
-			echo '<br>An update is ready. <a href="' . esc_url( admin_url( 'plugins.php' ) ) . '">Go to Plugins to update</a>.';
+		echo '<div style="background:#fff;border:1px solid #c3c4c7;border-left:4px solid #FF7033;padding:10px 14px;max-width:1100px;margin:14px 0;display:flex;gap:14px;align-items:center">';
+		echo '<div>';
+		if ( $newer ) {
+			echo '<strong>Tech Importer ' . esc_html( $latest ) . ' is available.</strong> You have ' . esc_html( self::VERSION ) . '.';
+		} else {
+			echo '<span style="color:#cf222e">Could not check GitHub for updates: ' . esc_html( $st['error'] ) . '</span>';
 		}
-		echo '<form method="post" style="display:inline;margin-left:10px">';
-		wp_nonce_field( 'tech_check_updates' );
-		echo '<button class="button" name="tech_check_updates" value="1">Check GitHub now</button></form></div>';
+		echo '</div><form method="post" style="margin:0">';
+		wp_nonce_field( 'tech_update_now' );
+		echo '<button class="button button-primary" name="tech_update_now" value="1">' . ( $newer ? 'Update' : 'Try again' ) . '</button></form></div>';
 	}
 
 	public function check_update( $update, $plugin_data, $plugin_file ) {

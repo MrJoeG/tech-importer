@@ -6,7 +6,7 @@ WordPress plugin for capitaloftechs.com. Upload a content zip under Tools > Tech
 1. Bump `Version:` and `VERSION` in `tech-importer/tech-importer.php`.
 2. Build `dist/tech-importer-X.Y.Z.zip`. The folder inside the zip must be `tech-importer/`.
 3. Update `update.json`: set `version` and `package`, and add a changelog entry.
-4. Push to `main`. Sites check for updates every 6 hours (or right away from Dashboard > Updates > Check again).
+4. Push to `main`. The Tech Importer screen shows an Update button when a newer version is on GitHub (checked every 6 hours, or 15 minutes after a failed check).
 
 ## Updates to existing pages (1.0.5)
 A zip's manifest.json can include a `changes` list. Each change is reviewed on the Tech Importer screen before anything is saved.
