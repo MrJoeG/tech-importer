@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.5
+ * Version: 1.0.6
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.5';
+	const VERSION    = '1.0.6';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -187,7 +187,7 @@ class Tech_Importer {
 			return;
 		}
 		echo '<p>Publish puts the draft live and clears the WP Rocket cache. Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
-		echo '<table class="widefat striped" style="max-width:900px"><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Images</th><th></th></tr></thead><tbody>';
+		echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Published date</th><th>Published time</th><th>Images</th><th></th></tr></thead><tbody>';
 		foreach ( $ids as $id ) {
 			$p = get_post( $id );
 			if ( ! $p || 'trash' === $p->post_status ) {
@@ -195,7 +195,13 @@ class Tech_Importer {
 			}
 			$imgs = count( $this->item_images( $id ) );
 			echo '<tr><td><a href="' . esc_url( get_edit_post_link( $id ) ) . '">' . esc_html( $p->post_title ) . '</a><br><small>/' . esc_html( $p->post_name ) . '/</small></td>';
-			echo '<td>' . esc_html( $p->post_type ) . '</td><td>' . esc_html( $p->post_status ) . '</td><td>' . (int) $imgs . '</td><td>';
+			$live = in_array( $p->post_status, array( 'publish', 'future' ), true );
+			$date = $live ? get_the_date( 'M j, Y', $p ) : '&mdash;';
+			$time = $live ? get_the_time( 'g:i a', $p ) : '&mdash;';
+			if ( 'future' === $p->post_status ) {
+				$date .= '<br><small>scheduled</small>';
+			}
+			echo '<td>' . esc_html( $p->post_type ) . '</td><td>' . esc_html( $p->post_status ) . '</td><td>' . wp_kses_post( $date ) . '</td><td>' . wp_kses_post( $time ) . '</td><td>' . (int) $imgs . '</td><td>';
 			if ( 'publish' === $p->post_status ) {
 				echo '<em>Live</em>';
 			} else {

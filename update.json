@@ -1,7 +1,7 @@
 {
-  "version": "1.0.5",
-  "package": "https://raw.githubusercontent.com/MrJoeG/tech-importer/main/dist/tech-importer-1.0.5.zip",
+  "version": "1.0.6",
+  "package": "https://raw.githubusercontent.com/MrJoeG/tech-importer/main/dist/tech-importer-1.0.6.zip",
   "requires_php": "7.4",
   "tested": "7.1",
-  "changelog": "<h4>1.0.5</h4><ul><li>Updates to existing pages: zips can now carry link and text changes for live pages. Each one is previewed first, applied only when you click Apply, checked after saving (page loads, headings, images and forms still there), and put back automatically if the check fails. Undo button for every applied update.</li></ul><h4>1.0.4</h4><ul><li>Publish and Preview buttons in Imported content. Publishing clears the WP Rocket cache.</li><li>Imports save a plain text copy of the page, so Yoast in the WordPress editor can read the words, links and images.</li></ul><h4>1.0.3</h4><ul><li>Automatic updates from GitHub.</li></ul><h4>1.0.2</h4><ul><li>Remove button and Imported content table.</li></ul><h4>1.0.0</h4><ul><li>First release: zip import of drafts with Elementor, Yoast and images.</li></ul>"
+  "changelog": "<h4>1.0.6</h4><ul><li>Imported content table shows the published date and time for each item.</li></ul><h4>1.0.5</h4><ul><li>Updates to existing pages: zips can now carry link and text changes for live pages. Each one is previewed first, applied only when you click Apply, checked after saving (page loads, headings, images and forms still there), and put back automatically if the check fails. Undo button for every applied update.</li></ul><h4>1.0.4</h4><ul><li>Publish and Preview buttons in Imported content. Publishing clears the WP Rocket cache.</li><li>Imports save a plain text copy of the page, so Yoast in the WordPress editor can read the words, links and images.</li></ul><h4>1.0.3</h4><ul><li>Automatic updates from GitHub.</li></ul><h4>1.0.2</h4><ul><li>Remove button and Imported content table.</li></ul><h4>1.0.0</h4><ul><li>First release: zip import of drafts with Elementor, Yoast and images.</li></ul>"
 }
