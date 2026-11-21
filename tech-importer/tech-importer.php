@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.8
+ * Version: 1.0.9
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.8';
+	const VERSION    = '1.0.9';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -23,6 +23,64 @@ class Tech_Importer {
 		add_filter( 'update_plugins_github.com', array( $this, 'check_update' ), 10, 3 );
 		add_filter( 'plugins_api', array( $this, 'plugin_info' ), 20, 3 );
 		add_action( 'upgrader_process_complete', array( $this, 'clear_update_cache' ) );
+		add_action( 'wp_footer', array( $this, 'sticky_bar' ) );
+	}
+
+	/* ---------- Sticky phone bar (1.0.9) ---------- */
+
+	private function sticky_opts() {
+		return wp_parse_args( get_option( 'tech_sticky', array() ), array(
+			'on'    => 1,
+			'phone' => '(210) 852-2353',
+			'label' => 'Free consultation',
+			'url'   => '/contact/',
+			'skip'  => 'contact',
+		) );
+	}
+
+	public function sticky_bar() {
+		$o = $this->sticky_opts();
+		if ( empty( $o['on'] ) || ! is_singular( array( 'post', 'page' ) ) || is_admin() ) {
+			return;
+		}
+		$slug = get_post_field( 'post_name', get_queried_object_id() );
+		$skip = array_filter( array_map( 'trim', explode( ',', (string) $o['skip'] ) ) );
+		if ( in_array( $slug, $skip, true ) ) {
+			return;
+		}
+		$tel  = preg_replace( '/[^0-9+]/', '', $o['phone'] );
+		$href = add_query_arg( 'src', 'sticky-' . ( $slug ? $slug : 'home' ), $o['url'] );
+		echo '<style>.tech-sticky{display:none}@media (max-width:767px){.tech-sticky{position:fixed;left:0;right:0;bottom:0;z-index:9990;display:flex;gap:10px;padding:10px 12px calc(10px + env(safe-area-inset-bottom));background:#2E1D63;box-shadow:0 -4px 18px rgba(0,0,0,.18);transform:translateY(110%);transition:transform .25s ease}.tech-sticky.on{transform:none}.tech-sticky a{flex:1;text-align:center;font-weight:700;font-size:15px;line-height:1.2;padding:12px 8px;border-radius:8px;text-decoration:none}.tech-sticky .t1{border:2px solid #fff;color:#fff}.tech-sticky .t2{background:#FF7033;color:#fff}body.tech-sticky-pad{padding-bottom:72px}}</style>';
+		echo '<div class="tech-sticky" id="tech-sticky"><a class="t1" href="tel:' . esc_attr( $tel ) . '">Call ' . esc_html( $o['phone'] ) . '</a><a class="t2" href="' . esc_url( $href ) . '">' . esc_html( $o['label'] ) . '</a></div>';
+		echo '<script>(function(){var b=document.getElementById("tech-sticky");if(!b)return;function f(){var h=document.documentElement.scrollHeight-window.innerHeight;var on=h>0&&window.scrollY/h>0.3;b.classList.toggle("on",on);document.body.classList.toggle("tech-sticky-pad",on);}window.addEventListener("scroll",f,{passive:true});f();})();</script>';
+	}
+
+	private function sticky_box() {
+		if ( isset( $_POST['tech_sticky_save'] ) ) {
+			check_admin_referer( 'tech_sticky' );
+			update_option( 'tech_sticky', array(
+				'on'    => empty( $_POST['tech_sticky_on'] ) ? 0 : 1,
+				'phone' => sanitize_text_field( wp_unslash( $_POST['tech_sticky_phone'] ) ),
+				'label' => sanitize_text_field( wp_unslash( $_POST['tech_sticky_label'] ) ),
+				'url'   => esc_url_raw( wp_unslash( $_POST['tech_sticky_url'] ) ),
+				'skip'  => sanitize_text_field( wp_unslash( $_POST['tech_sticky_skip'] ) ),
+			) );
+			if ( function_exists( 'rocket_clean_domain' ) ) {
+				rocket_clean_domain();
+			}
+			echo '<div class="notice notice-success"><p>Sticky phone bar saved. WP Rocket cache cleared.</p></div>';
+		}
+		$o = $this->sticky_opts();
+		echo '<h2 style="margin-top:30px">Sticky phone bar</h2><p>Shows on phones only, at the bottom of every page and post, after the visitor scrolls about a third of the way down.</p>';
+		echo '<form method="post">';
+		wp_nonce_field( 'tech_sticky' );
+		echo '<table class="form-table" style="max-width:800px"><tr><th>Show it</th><td><label><input type="checkbox" name="tech_sticky_on" value="1"' . checked( ! empty( $o['on'] ), true, false ) . '> On</label></td></tr>';
+		echo '<tr><th>Phone</th><td><input class="regular-text" name="tech_sticky_phone" value="' . esc_attr( $o['phone'] ) . '"></td></tr>';
+		echo '<tr><th>Button text</th><td><input class="regular-text" name="tech_sticky_label" value="' . esc_attr( $o['label'] ) . '"></td></tr>';
+		echo '<tr><th>Button link</th><td><input class="regular-text" name="tech_sticky_url" value="' . esc_attr( $o['url'] ) . '"><p class="description">The page slug is added as ?src=sticky-page-name so lead emails show where it came from.</p></td></tr>';
+		echo '<tr><th>Hide on</th><td><input class="regular-text" name="tech_sticky_skip" value="' . esc_attr( $o['skip'] ) . '"><p class="description">Page slugs, separated by commas.</p></td></tr></table>';
+		submit_button( 'Save sticky bar', 'secondary', 'tech_sticky_save' );
+		echo '</form>';
 	}
 
 	private function remote_info() {
@@ -194,6 +252,7 @@ class Tech_Importer {
 		echo '</form>';
 		$this->list_changes();
 		$this->list_imports();
+		$this->sticky_box();
 		echo '</div>';
 	}
 
@@ -674,11 +733,11 @@ class Tech_Importer {
 		$pending = get_option( 'tech_pending_changes', array() );
 		$n       = 0;
 		foreach ( $changes as $c ) {
-			if ( ! is_array( $c ) || empty( $c['page'] ) || empty( $c['find'] ) ) {
+			if ( ! is_array( $c ) || empty( $c['page'] ) || ( empty( $c['find'] ) && empty( $c['section'] ) ) ) {
 				$this->note( 'err', 'An update in the zip is missing its page or text, skipped.' );
 				continue;
 			}
-			$type = ( isset( $c['type'] ) && 'replace' === $c['type'] ) ? 'replace' : 'link';
+			$type = ( isset( $c['type'] ) && in_array( $c['type'], array( 'replace', 'insert' ), true ) ) ? $c['type'] : 'link';
 			$row  = array(
 				'id'      => substr( md5( wp_json_encode( $c ) . microtime() . $n ), 0, 10 ),
 				'batch'   => sanitize_text_field( $batch ),
@@ -689,7 +748,13 @@ class Tech_Importer {
 				'replace' => isset( $c['replace'] ) ? wp_kses_post( $c['replace'] ) : '',
 				'note'    => isset( $c['note'] ) ? sanitize_text_field( $c['note'] ) : '',
 				'paste'   => isset( $c['paste'] ) ? wp_kses_post( $c['paste'] ) : '',
+				'after_section' => isset( $c['after_section'] ) ? array_map( 'sanitize_text_field', (array) $c['after_section'] ) : array(),
+				'after_heading' => isset( $c['after_heading'] ) ? array_map( 'sanitize_text_field', (array) $c['after_heading'] ) : array(),
+				'section' => ( isset( $c['section'] ) && is_array( $c['section'] ) ) ? $c['section'] : array(),
 			);
+			if ( 'insert' === $type ) {
+				$row['find'] = isset( $c['label'] ) ? sanitize_text_field( $c['label'] ) : 'New section';
+			}
 			if ( 'link' === $type && '' === $row['url'] ) {
 				$this->note( 'err', 'Link update for "' . esc_html( $row['find'] ) . '" has no URL, skipped.' );
 				continue;
@@ -801,6 +866,76 @@ class Tech_Importer {
 		return $changed;
 	}
 
+
+	private function heading_texts( $el, &$out ) {
+		if ( isset( $el['widgetType'] ) && 'heading' === $el['widgetType'] && ! empty( $el['settings']['title'] ) ) {
+			$out[] = wp_strip_all_tags( $el['settings']['title'] );
+		}
+		foreach ( isset( $el['elements'] ) ? (array) $el['elements'] : array() as $ch ) {
+			if ( is_array( $ch ) ) {
+				$this->heading_texts( $ch, $out );
+			}
+		}
+	}
+
+	/* Index of the top-level section to insert after, or -1. Fills $label with where it was found. */
+	private function insert_spot( $layout, $c, &$label ) {
+		foreach ( $c['after_section'] as $want ) {
+			foreach ( $layout as $i => $el ) {
+				$t = isset( $el['settings']['_title'] ) ? $el['settings']['_title'] : '';
+				if ( $t && 0 === strcasecmp( trim( $t ), trim( $want ) ) ) {
+					$label = 'after the "' . $t . '" section';
+					return $i;
+				}
+			}
+		}
+		foreach ( $c['after_heading'] as $want ) {
+			foreach ( $layout as $i => $el ) {
+				$hs = array();
+				$this->heading_texts( $el, $hs );
+				foreach ( $hs as $h ) {
+					if ( false !== stripos( $h, $want ) ) {
+						$label = 'after the section with the heading "' . $h . '"';
+						return $i;
+					}
+				}
+			}
+		}
+		return -1;
+	}
+
+
+	private function first_link( $el ) {
+		if ( ! empty( $el['settings']['link']['url'] ) ) {
+			return $el['settings']['link']['url'];
+		}
+		foreach ( isset( $el['elements'] ) ? (array) $el['elements'] : array() as $ch ) {
+			$l = $this->first_link( $ch );
+			if ( $l ) {
+				return $l;
+			}
+		}
+		return '';
+	}
+
+	private function fresh_ids( &$el ) {
+		$el['id'] = substr( md5( wp_generate_password( 12, false ) ), 0, 7 );
+		if ( ! empty( $el['elements'] ) ) {
+			foreach ( $el['elements'] as &$ch ) {
+				$this->fresh_ids( $ch );
+			}
+		}
+	}
+
+	private function has_section_title( $layout, $title ) {
+		foreach ( $layout as $el ) {
+			if ( isset( $el['settings']['_title'] ) && $el['settings']['_title'] === $title ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
 	private function get_layout( $post ) {
 		$raw = get_post_meta( $post->ID, '_elementor_data', true );
 		if ( ! $raw ) {
@@ -819,6 +954,21 @@ class Tech_Importer {
 		$layout = $this->get_layout( $post );
 		$where  = array();
 		$found  = 0;
+		if ( 'insert' === $c['type'] ) {
+			if ( ! $layout ) {
+				return array( 'status' => 'err', 'post' => $post, 'msg' => 'This page is not built with Elementor, so a section can\'t be added here.' );
+			}
+			$title = isset( $c['section']['settings']['_title'] ) ? $c['section']['settings']['_title'] : '';
+			if ( $title && $this->has_section_title( $layout, $title ) ) {
+				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'The "' . esc_html( $title ) . '" section is already on this page.' );
+			}
+			$label = '';
+			$i     = $this->insert_spot( $layout, $c, $label );
+			if ( $i < 0 ) {
+				return array( 'status' => 'err', 'post' => $post, 'msg' => 'Could not find the section to place it after (looked for: ' . esc_html( implode( ', ', array_merge( $c['after_section'], $c['after_heading'] ) ) ) . ').' );
+			}
+			return array( 'status' => 'ready', 'post' => $post, 'where' => array( 'insert', $label, '' ), 'layout' => $layout );
+		}
 		if ( $layout ) {
 			$flat = wp_json_encode( $layout, JSON_UNESCAPED_SLASHES );
 			if ( 'link' === $c['type'] && ( false !== strpos( $flat, 'href=\"' . $c['url'] . '\"' ) || false !== strpos( $flat, 'href=\"' . home_url( $c['url'] ) . '\"' ) ) ) {
@@ -880,15 +1030,19 @@ class Tech_Importer {
 				$r     = $this->check_change( $c );
 				$ready = 'ready' === $r['status'];
 				$title = ! empty( $r['post'] ) ? $r['post']->post_title : $c['page'];
-				$what  = 'link' === $c['type']
+				$what  = 'insert' === $c['type']
+					? 'Add the <strong>' . esc_html( $c['find'] ) . '</strong> section'
+					: ( 'link' === $c['type']
 					? 'Link <strong>"' . esc_html( $c['find'] ) . '"</strong> to <code>' . esc_html( $c['url'] ) . '</code>'
-					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>';
+					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>' );
 				if ( $c['note'] ) {
 					$what .= '<br><small>' . esc_html( $c['note'] ) . '</small>';
 				}
 				echo '<tr><td>' . ( $ready ? '<input type="checkbox" name="tech_change[]" value="' . esc_attr( $c['id'] ) . '" checked>' : '' ) . '</td>';
 				echo '<td>' . esc_html( $title ) . '<br><small>/' . esc_html( trim( $c['page'], '/' ) ) . '/</small></td><td>' . $what . '</td><td>';
-				if ( $ready ) {
+				if ( $ready && 'insert' === $c['type'] ) {
+					echo 'Goes in ' . esc_html( $r['where'][1] ) . '.' . ( $c['note'] ? '' : '' );
+				} elseif ( $ready ) {
 					echo '<small style="color:#666">' . esc_html( $r['where'][0] ) . '</small><br>' . $this->snippet( $r['where'][1], $r['where'][2] );
 				} else {
 					$color = 'skip' === $r['status'] ? '#9a6700' : '#cf222e';
@@ -1017,9 +1171,28 @@ class Tech_Importer {
 			$problems    = array();
 			$expect      = array();
 
+			$added = 0;
 			foreach ( $changes as $c ) {
 				$where = array();
 				$found = 0;
+				if ( 'insert' === $c['type'] ) {
+					$label = '';
+					$i     = $layout ? $this->insert_spot( $layout, $c, $label ) : -1;
+					$sec   = $c['section'];
+					if ( $i < 0 || ! $sec ) {
+						$problems[] = 'Could not place the "' . esc_html( $c['find'] ) . '" section';
+						continue;
+					}
+					$this->fresh_ids( $sec );
+					$tmp    = array();
+					$added += $this->count_nodes( array( $sec ), $tmp );
+					array_splice( $layout, $i + 1, 0, array( $sec ) );
+					$what[] = 'Added the "' . esc_html( $c['find'] ) . '" section ' . esc_html( $label );
+					$link   = $this->first_link( $sec );
+					$expect[] = $link ? $link : '';
+					unset( $pending[ $c['id'] ] );
+					continue;
+				}
 				if ( $layout ) {
 					$n = $this->apply_to_elements( $layout, $c, $where, $found );
 				} else {
@@ -1064,7 +1237,7 @@ class Tech_Importer {
 				$ids1   = array();
 				$nodes1 = $this->count_nodes( $layout, $ids1 );
 				$json   = wp_json_encode( $layout );
-				if ( $nodes1 !== $nodes0 || $ids1 !== $ids0 || ! is_array( json_decode( $json, true ) ) ) {
+				if ( $nodes1 !== $nodes0 + $added || array_diff( $ids0, $ids1 ) || ! is_array( json_decode( $json, true ) ) ) {
 					$this->note( 'err', esc_html( $post->post_title ) . ': layout check failed (sections or widgets would change). This page was not changed.' );
 					foreach ( $changes as $c ) {
 						$pending[ $c['id'] ] = $c;
@@ -1119,7 +1292,7 @@ class Tech_Importer {
 		if ( $after['len'] < $before['len'] * 0.9 ) {
 			return array( 'fail', 'page got much shorter' );
 		}
-		foreach ( $expect as $e ) {
+		foreach ( array_filter( $expect ) as $e ) {
 			if ( false === strpos( $after['body'], $e ) ) {
 				return array( 'warn', 'Saved, but the new text is not showing yet (probably cache). Clear the WP Rocket cache and look at the page' );
 			}
