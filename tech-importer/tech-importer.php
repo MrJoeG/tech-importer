@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.6
+ * Version: 1.0.7
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.6';
+	const VERSION    = '1.0.7';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -31,13 +31,47 @@ class Tech_Importer {
 		}
 		$info = get_transient( 'tech_importer_update' );
 		if ( false === $info ) {
-			$res  = wp_remote_get( self::UPDATE_URL . '?t=' . time(), array( 'timeout' => 10 ) );
-			$info = ( ! is_wp_error( $res ) && 200 === wp_remote_retrieve_response_code( $res ) )
-				? json_decode( wp_remote_retrieve_body( $res ), true )
-				: array();
-			set_transient( 'tech_importer_update', $info, 6 * HOUR_IN_SECONDS );
+			$res = wp_remote_get( self::UPDATE_URL . '?t=' . time(), array( 'timeout' => 15 ) );
+			$err = '';
+			if ( is_wp_error( $res ) ) {
+				$err = $res->get_error_message();
+			} elseif ( 200 !== wp_remote_retrieve_response_code( $res ) ) {
+				$err = 'GitHub answered ' . wp_remote_retrieve_response_code( $res );
+			}
+			$info = $err ? array() : json_decode( wp_remote_retrieve_body( $res ), true );
+			if ( ! $err && ! is_array( $info ) ) {
+				$err  = 'update.json could not be read';
+				$info = array();
+			}
+			update_option( 'tech_importer_update_status', array( 'time' => current_time( 'mysql' ), 'error' => $err, 'version' => isset( $info['version'] ) ? $info['version'] : '' ), false );
+			set_transient( 'tech_importer_update', $info, $err ? 15 * MINUTE_IN_SECONDS : 6 * HOUR_IN_SECONDS );
 		}
 		return is_array( $info ) ? $info : array();
+	}
+
+	private function update_box() {
+		if ( isset( $_POST['tech_check_updates'] ) ) {
+			check_admin_referer( 'tech_check_updates' );
+			delete_transient( 'tech_importer_update' );
+			delete_site_transient( 'update_plugins' );
+			$this->remote_info();
+			wp_update_plugins();
+		}
+		$st     = get_option( 'tech_importer_update_status', array() );
+		$latest = ! empty( $st['version'] ) ? $st['version'] : 'unknown';
+		echo '<div style="background:#fff;border:1px solid #c3c4c7;border-left:4px solid #FF7033;padding:10px 14px;max-width:1100px;margin:14px 0">';
+		echo '<strong>Version ' . esc_html( self::VERSION ) . '</strong> installed. Latest on GitHub: <strong>' . esc_html( $latest ) . '</strong>';
+		if ( ! empty( $st['time'] ) ) {
+			echo ' <small>(checked ' . esc_html( $st['time'] ) . ')</small>';
+		}
+		if ( ! empty( $st['error'] ) ) {
+			echo '<br><span style="color:#cf222e">Last check failed: ' . esc_html( $st['error'] ) . '</span>';
+		} elseif ( 'unknown' !== $latest && version_compare( $latest, self::VERSION, '>' ) ) {
+			echo '<br>An update is ready. <a href="' . esc_url( admin_url( 'plugins.php' ) ) . '">Go to Plugins to update</a>.';
+		}
+		echo '<form method="post" style="display:inline;margin-left:10px">';
+		wp_nonce_field( 'tech_check_updates' );
+		echo '<button class="button" name="tech_check_updates" value="1">Check GitHub now</button></form></div>';
 	}
 
 	public function check_update( $update, $plugin_data, $plugin_file ) {
@@ -91,6 +125,7 @@ class Tech_Importer {
 			wp_die( 'Not allowed.' );
 		}
 		echo '<div class="wrap"><h1>Tech Importer</h1>';
+		$this->update_box();
 		echo '<p>Upload the zip from Claude. Everything comes in as a <strong>draft</strong>. Nothing is published.</p>';
 
 		if ( isset( $_POST['tech_remove'] ) || isset( $_POST['tech_publish'] ) ) {
