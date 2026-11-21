@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.9
+ * Version: 1.0.10
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.9';
+	const VERSION    = '1.0.10';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -751,6 +751,10 @@ class Tech_Importer {
 				'after_section' => isset( $c['after_section'] ) ? array_map( 'sanitize_text_field', (array) $c['after_section'] ) : array(),
 				'after_heading' => isset( $c['after_heading'] ) ? array_map( 'sanitize_text_field', (array) $c['after_heading'] ) : array(),
 				'section' => ( isset( $c['section'] ) && is_array( $c['section'] ) ) ? $c['section'] : array(),
+				'anchor'  => isset( $c['anchor'] ) ? (string) $c['anchor'] : '',
+				'close'   => isset( $c['close'] ) ? (string) $c['close'] : '',
+				'add'     => isset( $c['add'] ) ? wp_kses_post( $c['add'] ) : '',
+				'marker'  => isset( $c['marker'] ) ? (string) $c['marker'] : '',
 			);
 			if ( 'insert' === $type ) {
 				$row['find'] = isset( $c['label'] ) ? sanitize_text_field( $c['label'] ) : 'New section';
@@ -821,6 +825,36 @@ class Tech_Importer {
 		return $changed;
 	}
 
+	/*
+	 * Replace text. Exact match first. If the exact text is gone (the editor often rewrites
+	 * styles and spacing when a page is saved by hand), fall back to the anchor: find the
+	 * anchor words, then the next closing tag, and add the new HTML right after it.
+	 */
+	private function replace_text( $val, $c, &$cnt ) {
+		$cnt = substr_count( $val, $c['find'] );
+		if ( $cnt ) {
+			return str_replace( $c['find'], $c['replace'], $val );
+		}
+		if ( empty( $c['anchor'] ) || empty( $c['close'] ) || empty( $c['add'] ) ) {
+			return $val;
+		}
+		if ( ! empty( $c['marker'] ) && false !== strpos( $val, $c['marker'] ) ) {
+			return $val;
+		}
+		$cnt = substr_count( $val, $c['anchor'] );
+		if ( 1 !== $cnt ) {
+			return $val;
+		}
+		$pos = strpos( $val, $c['anchor'] );
+		$end = stripos( $val, $c['close'], $pos );
+		if ( false === $end ) {
+			$cnt = 0;
+			return $val;
+		}
+		$end += strlen( $c['close'] );
+		return substr( $val, 0, $end ) . $c['add'] . substr( $val, $end );
+	}
+
 	private function apply_to_settings( &$st, $c, &$where, &$found, $widget, $already ) {
 		$changed = 0;
 		foreach ( $st as $key => &$val ) {
@@ -852,10 +886,10 @@ class Tech_Importer {
 					$changed++;
 				}
 			} else {
-				$cnt = substr_count( $val, $c['find'] );
+				$cnt = 0;
+				$new = $this->replace_text( $val, $c, $cnt );
 				if ( $cnt ) {
 					$found += $cnt;
-					$new    = str_replace( $c['find'], $c['replace'], $val );
 					$where  = array( $widget . ' / ' . $key, $val, $new );
 					$val    = $new;
 					$changed += $cnt;
@@ -971,6 +1005,9 @@ class Tech_Importer {
 		}
 		if ( $layout ) {
 			$flat = wp_json_encode( $layout, JSON_UNESCAPED_SLASHES );
+			if ( ! empty( $c['marker'] ) && false !== strpos( $flat, $c['marker'] ) ) {
+				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This update is already on the page.' );
+			}
 			if ( 'link' === $c['type'] && ( false !== strpos( $flat, 'href=\"' . $c['url'] . '\"' ) || false !== strpos( $flat, 'href=\"' . home_url( $c['url'] ) . '\"' ) ) ) {
 				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This page already links to ' . esc_html( $c['url'] ) . '.' );
 			}
@@ -980,8 +1017,7 @@ class Tech_Importer {
 			if ( 'link' === $c['type'] ) {
 				$new = $this->link_html( $html, $c['find'], $c['url'], $found );
 			} else {
-				$found = substr_count( $html, $c['find'] );
-				$new   = str_replace( $c['find'], $c['replace'], $html );
+				$new = $this->replace_text( $html, $c, $found );
 			}
 			$n     = $new !== $html ? 1 : 0;
 			$where = $n ? array( 'page content', $html, $new ) : array();
@@ -1202,7 +1238,8 @@ class Tech_Importer {
 					$f       = 0;
 					$content = $this->link_html( $content, $c['find'], $c['url'], $f );
 				} else {
-					$content = str_replace( $c['find'], $c['replace'], $content );
+					$f       = 0;
+					$content = $this->replace_text( $content, $c, $f );
 				}
 				if ( ! $layout ) {
 					$n = 1;
