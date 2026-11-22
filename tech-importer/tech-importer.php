@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.14
+ * Version: 1.0.15
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.14';
+	const VERSION    = '1.0.15';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -27,6 +27,22 @@ class Tech_Importer {
 		add_shortcode( 'tech_price', array( $this, 'price_sc' ) );
 		add_filter( 'elementor/frontend/the_content', array( $this, 'price_fill' ), 20 );
 		add_filter( 'widget_text', array( $this, 'price_fill' ), 20 );
+	}
+
+	/* ---------- Comments off (1.0.15) ---------- */
+
+	private function comments_box() {
+		global $wpdb;
+		$open = (int) $wpdb->get_var( "SELECT COUNT(*) FROM {$wpdb->posts} WHERE post_type IN ('post','page') AND post_status <> 'auto-draft' AND ( comment_status <> 'closed' OR ping_status <> 'closed' )" );
+		echo '<h2 style="margin-top:30px">Comments</h2><p>Everything Tech Importer creates comes in with comments and pingbacks turned off.';
+		if ( ! $open ) {
+			echo ' Every page and post on the site already has them off.</p>';
+			return;
+		}
+		echo ' <strong>' . $open . '</strong> pages and posts still allow comments or pingbacks.</p><form method="post">';
+		wp_nonce_field( 'tech_close_comments' );
+		submit_button( 'Turn off comments on all pages and posts', 'secondary', 'tech_close_comments', false, array( 'onclick' => "return confirm('Turn off comments and pingbacks on every page and post?');" ) );
+		echo '</form>';
 	}
 
 	/* ---------- Paging for long lists (1.0.14) ---------- */
@@ -539,6 +555,19 @@ class Tech_Importer {
 			$this->print_log();
 		}
 
+		if ( isset( $_POST['tech_close_comments'] ) ) {
+			check_admin_referer( 'tech_close_comments' );
+			global $wpdb;
+			$n = $wpdb->query( "UPDATE {$wpdb->posts} SET comment_status = 'closed', ping_status = 'closed' WHERE post_type IN ('post','page') AND ( comment_status <> 'closed' OR ping_status <> 'closed' )" );
+			clean_post_cache( 0 );
+			wp_cache_flush();
+			if ( function_exists( 'rocket_clean_domain' ) ) {
+				rocket_clean_domain();
+			}
+			$this->note( 'ok', 'Comments and pingbacks turned off on ' . (int) $n . ' pages and posts.' );
+			$this->print_log();
+		}
+
 		if ( isset( $_POST['tech_prices_save'] ) || isset( $_POST['tech_price_convert'] ) ) {
 			$this->price_post();
 		}
@@ -563,6 +592,7 @@ class Tech_Importer {
 		$this->list_changes();
 		$this->list_imports();
 		$this->price_box();
+		$this->comments_box();
 		$this->sticky_box();
 		echo '</div>';
 	}
@@ -985,6 +1015,8 @@ class Tech_Importer {
 			'post_title'   => $title,
 			'post_name'    => $slug,
 			'post_status'  => 'draft',
+			'comment_status' => 'closed',
+			'ping_status'  => 'closed',
 			'post_excerpt' => isset( $item['excerpt'] ) ? $item['excerpt'] : '',
 			'post_content' => isset( $item['content'] ) ? $item['content'] : '',
 			'meta_input'   => $meta,
