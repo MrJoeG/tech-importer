@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.12
+ * Version: 1.0.13
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.12';
+	const VERSION    = '1.0.13';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -24,6 +24,262 @@ class Tech_Importer {
 		add_filter( 'plugins_api', array( $this, 'plugin_info' ), 20, 3 );
 		add_action( 'upgrader_process_complete', array( $this, 'clear_update_cache' ) );
 		add_action( 'wp_footer', array( $this, 'sticky_bar' ) );
+		add_shortcode( 'cot_price', array( $this, 'price_sc' ) );
+		add_filter( 'elementor/frontend/the_content', array( $this, 'price_fill' ), 20 );
+		add_filter( 'widget_text', array( $this, 'price_fill' ), 20 );
+	}
+
+	/* ---------- Price list (1.0.13) ---------- */
+
+	private function price_defaults() {
+		return array(
+			'seo'           => array( 'Local SEO plans, from (per month)', '$499' ),
+			'care'          => array( 'Website care plan, from (per month, 12-month plan)', '$199' ),
+			'care_6'        => array( 'Website care plan, 6-month plan (per month)', '$249' ),
+			'care_1'        => array( 'Website care plan, 1 month', '$399' ),
+			'care_6_total'  => array( 'Website care plan, 6-month total', '$1,494' ),
+			'care_12_total' => array( 'Website care plan, 12-month total', '$2,388' ),
+			'care_setup'    => array( 'Care plan setup fee', '$299' ),
+			'hourly'        => array( 'Extra edits, per hour', '$75' ),
+			'build_starter' => array( 'Website build, Starter from', '$2,500' ),
+			'build_growth'  => array( 'Website build, Growth from', '$4,600' ),
+			'build_custom'  => array( 'Custom build or online store, around', '$7,000' ),
+		);
+	}
+
+	private function prices() {
+		$p = get_option( 'tech_prices' );
+		return is_array( $p ) && $p ? $p : $this->price_defaults();
+	}
+
+	public function price_sc( $atts ) {
+		$a = shortcode_atts( array( 'key' => '' ), $atts, 'cot_price' );
+		$p = $this->prices();
+		$k = sanitize_key( $a['key'] );
+		return isset( $p[ $k ] ) ? esc_html( $p[ $k ][1] ) : '';
+	}
+
+	public function price_fill( $html ) {
+		if ( is_string( $html ) && false !== strpos( $html, '[cot_price' ) ) {
+			$html = preg_replace_callback( '/\[cot_price\s+key=(?:"|&quot;|&#8221;|&#8243;|\')?([a-z0-9_]+)(?:"|&quot;|&#8221;|&#8243;|\')?\s*\]/i', function ( $m ) {
+				return $this->price_sc( array( 'key' => $m[1] ) );
+			}, $html );
+		}
+		return $html;
+	}
+
+	private function price_tag( $key ) {
+		return '[cot_price key="' . $key . '"]';
+	}
+
+	private function price_posts() {
+		return get_posts( array( 'post_type' => array( 'page', 'post' ), 'post_status' => array( 'publish', 'draft', 'future', 'private' ), 'numberposts' => -1, 'fields' => 'ids' ) );
+	}
+
+	private function price_ref( $post ) {
+		return 'page' === $post->post_type ? get_page_uri( $post ) : $post->post_name;
+	}
+
+	private function price_rx( $value ) {
+		return '/(?<![0-9])' . preg_quote( $value, '/' ) . '(?![0-9]|[,.][0-9])/';
+	}
+
+	/* Walk every text setting of a layout and call $fn( element id, widget, field, value ). */
+	private function price_walk( $elements, $fn, $el_id = '', $widget = '' ) {
+		foreach ( (array) $elements as $el ) {
+			if ( ! is_array( $el ) ) {
+				continue;
+			}
+			$id = isset( $el['id'] ) ? $el['id'] : $el_id;
+			$wt = isset( $el['widgetType'] ) ? $el['widgetType'] : ( isset( $el['elType'] ) ? $el['elType'] : $widget );
+			if ( ! empty( $el['settings'] ) && is_array( $el['settings'] ) ) {
+				$this->price_walk_settings( $el['settings'], $fn, $id, $wt );
+			}
+			if ( ! empty( $el['elements'] ) ) {
+				$this->price_walk( $el['elements'], $fn, $id, $wt );
+			}
+		}
+	}
+
+	private function price_walk_settings( $st, $fn, $id, $wt ) {
+		foreach ( $st as $key => $val ) {
+			if ( is_array( $val ) ) {
+				foreach ( $val as $row ) {
+					if ( is_array( $row ) ) {
+						$this->price_walk_settings( $row, $fn, $id, $wt );
+					}
+				}
+				continue;
+			}
+			if ( is_string( $val ) && false !== strpos( $val, '$' ) || ( is_string( $val ) && false !== strpos( $val, '[cot_price' ) ) ) {
+				$fn( $id, $wt, (string) $key, $val );
+			}
+		}
+	}
+
+	/* Where each price tag is used, and every price still typed out as plain text. */
+	private function price_scan() {
+		$prices = $this->prices();
+		$used   = array();
+		$hits   = array();
+		foreach ( $this->price_posts() as $pid ) {
+			$post   = get_post( $pid );
+			$layout = $this->get_layout( $post );
+			$fields = array();
+			if ( $layout ) {
+				$this->price_walk( $layout, function ( $id, $wt, $key, $val ) use ( &$fields ) {
+					$fields[] = array( $id, $wt, $key, $val );
+				} );
+			} elseif ( false !== strpos( $post->post_content, '$' ) || false !== strpos( $post->post_content, '[cot_price' ) ) {
+				$fields[] = array( '', 'page content', 'content', $post->post_content );
+			}
+			foreach ( $fields as $f ) {
+				if ( preg_match_all( '/\[cot_price\s+key=["\']?([a-z0-9_]+)/i', $f[3], $m ) ) {
+					foreach ( $m[1] as $k ) {
+						$used[ strtolower( $k ) ][ $pid ] = true;
+					}
+				}
+				foreach ( $prices as $k => $row ) {
+					if ( '' === $row[1] || ! preg_match_all( $this->price_rx( $row[1] ), $f[3], $mm, PREG_OFFSET_CAPTURE ) ) {
+						continue;
+					}
+					foreach ( $mm[0] as $one ) {
+						$off   = $one[1];
+						$start = max( 0, $off - 60 );
+						$ctx   = substr( $f[3], $start, $off - $start + strlen( $row[1] ) + 60 );
+						$rel   = $off - $start;
+						$hid   = substr( md5( $pid . '|' . $f[0] . '|' . $f[2] . '|' . $off . '|' . $k ), 0, 10 );
+						$hits[ $hid ] = array(
+							'post'    => $pid,
+							'ref'     => $this->price_ref( $post ),
+							'title'   => get_the_title( $pid ),
+							'where'   => $f[1] . ' / ' . $f[2],
+							'key'     => $k,
+							'value'   => $row[1],
+							'field'   => $pid . '|' . $f[0] . '|' . $f[1] . '|' . $f[2] . '|' . md5( $f[3] ),
+							'full'    => $f[3],
+							'off'     => $off,
+							'ok'      => '' === $f[0] || in_array( $f[2], $this->text_fields(), true ),
+							'show'    => wp_strip_all_tags( substr( $ctx, 0, $rel ) ) . '<mark>' . $row[1] . '</mark>' . wp_strip_all_tags( substr( $ctx, $rel + strlen( $row[1] ) ) ),
+						);
+					}
+				}
+			}
+		}
+		return array( $used, $hits );
+	}
+
+	private function price_post() {
+		$prices = $this->prices();
+		if ( isset( $_POST['tech_prices_save'] ) ) {
+			check_admin_referer( 'tech_prices' );
+			$keys   = isset( $_POST['tp_key'] ) ? (array) wp_unslash( $_POST['tp_key'] ) : array();
+			$labels = isset( $_POST['tp_label'] ) ? (array) wp_unslash( $_POST['tp_label'] ) : array();
+			$vals   = isset( $_POST['tp_value'] ) ? (array) wp_unslash( $_POST['tp_value'] ) : array();
+			$new    = array();
+			foreach ( $keys as $i => $k ) {
+				$k = sanitize_key( $k );
+				$v = isset( $vals[ $i ] ) ? trim( sanitize_text_field( $vals[ $i ] ) ) : '';
+				if ( '' === $k || '' === $v ) {
+					continue;
+				}
+				$new[ $k ] = array( isset( $labels[ $i ] ) ? sanitize_text_field( $labels[ $i ] ) : '', $v );
+			}
+			if ( $new ) {
+				update_option( 'tech_prices', $new );
+				$prices = $new;
+				if ( class_exists( '\Elementor\Plugin' ) ) {
+					\Elementor\Plugin::$instance->files_manager->clear_cache();
+				}
+				delete_post_meta_by_key( '_elementor_element_cache' );
+				if ( function_exists( 'rocket_clean_domain' ) ) {
+					rocket_clean_domain();
+				}
+				echo '<div class="notice notice-success"><p>Prices saved. Every page that uses a price tag now shows the new price. Elementor and WP Rocket caches cleared. Yoast titles, meta descriptions and images still need to be changed by hand.</p></div>';
+			}
+		}
+		if ( isset( $_POST['tech_price_convert'] ) ) {
+			check_admin_referer( 'tech_prices' );
+			$hits   = get_transient( 'tech_price_hits' );
+			$picked = isset( $_POST['tp_hit'] ) ? array_map( 'sanitize_key', (array) $_POST['tp_hit'] ) : array();
+			$groups = array();
+			foreach ( $picked as $h ) {
+				if ( is_array( $hits ) && ! empty( $hits[ $h ] ) && $hits[ $h ]['ok'] ) {
+					$groups[ $hits[ $h ]['field'] ][] = $hits[ $h ];
+				}
+			}
+			$rows = array();
+			foreach ( $groups as $list ) {
+				usort( $list, function ( $a, $b ) {
+					return $b['off'] - $a['off'];
+				} );
+				$text  = $list[0]['full'];
+				if ( wp_kses_post( $text ) !== $text ) {
+					$this->note( 'err', 'A price on ' . esc_html( $list[0]['title'] ) . ' sits in text with code the updater can\'t copy safely. Type the price tag there by hand in Elementor.' );
+					continue;
+				}
+				$notes = array();
+				foreach ( $list as $x ) {
+					$text    = substr_replace( $text, $this->price_tag( $x['key'] ), $x['off'], strlen( $x['value'] ) );
+					$notes[] = $x['value'] . ' to ' . $this->price_tag( $x['key'] );
+				}
+				$rows[] = array(
+					'type'    => 'replace',
+					'page'    => $list[0]['ref'],
+					'find'    => $list[0]['full'],
+					'replace' => $text,
+					'note'    => 'Price tags: ' . implode( ', ', array_reverse( $notes ) ),
+				);
+			}
+			if ( $rows ) {
+				$this->queue_changes( $rows, 'price-tags-' . gmdate( 'Y-m-d' ) );
+			} else {
+				$this->note( 'err', 'No prices were picked.' );
+			}
+			$this->print_log();
+		}
+	}
+
+	private function price_box() {
+		$prices = $this->prices();
+		list( $used, $hits ) = $this->price_scan();
+		set_transient( 'tech_price_hits', $hits, DAY_IN_SECONDS );
+
+		echo '<h2 style="margin-top:30px">Prices</h2>';
+		echo '<p>Change a price here and every page that uses its price tag updates by itself. In Elementor, type the tag instead of the price, for example <code>' . esc_html( $this->price_tag( 'seo' ) ) . '</code> shows ' . esc_html( isset( $prices['seo'] ) ? $prices['seo'][1] : '' ) . '. Yoast titles, meta descriptions and prices inside images are not covered, change those by hand.</p>';
+		echo '<form method="post">';
+		wp_nonce_field( 'tech_prices' );
+		echo '<table class="widefat striped" style="max-width:1000px"><thead><tr><th>Price tag</th><th>What it is</th><th>Price</th><th>Used on</th></tr></thead><tbody>';
+		$prices['']  = array( '', '' );
+		foreach ( $prices as $k => $row ) {
+			$pages = array();
+			foreach ( isset( $used[ $k ] ) ? array_keys( $used[ $k ] ) : array() as $pid ) {
+				$pages[] = '<a href="' . esc_url( get_permalink( $pid ) ) . '" target="_blank">' . esc_html( get_the_title( $pid ) ) . '</a>';
+			}
+			echo '<tr><td>' . ( '' === $k ? '<input name="tp_key[]" placeholder="new_key" style="width:140px">' : '<input type="hidden" name="tp_key[]" value="' . esc_attr( $k ) . '"><code>' . esc_html( $this->price_tag( $k ) ) . '</code>' ) . '</td>';
+			echo '<td><input name="tp_label[]" value="' . esc_attr( $row[0] ) . '" style="width:100%"></td>';
+			echo '<td><input name="tp_value[]" value="' . esc_attr( $row[1] ) . '" style="width:110px"></td>';
+			echo '<td>' . ( $pages ? implode( ', ', $pages ) : '<span style="color:#888">Not used yet</span>' ) . '</td></tr>';
+		}
+		echo '</tbody></table><p class="description">To remove a price, clear its Price box and save. Add a new one in the empty last row (lowercase letters, numbers and underscores).</p>';
+		submit_button( 'Save prices', 'primary', 'tech_prices_save' );
+
+		echo '<h3>Prices still typed out on pages</h3>';
+		if ( ! $hits ) {
+			echo '<p>None found. Every price on the site uses a price tag.</p>';
+		} else {
+			echo '<p>These match a price in the list above but are typed as plain text, so they won\'t change with the list. Tick the ones that are <strong>your</strong> prices (leave market ranges in guides alone), then click the button. They go to "Updates to existing pages" for the usual preview, Apply and Undo.</p>';
+			echo '<table class="widefat striped" style="max-width:1000px"><thead><tr><th></th><th>Page</th><th>Price</th><th>Text around it</th></tr></thead><tbody>';
+			foreach ( $hits as $id => $x ) {
+				echo '<tr><td>' . ( $x['ok'] ? '<input type="checkbox" name="tp_hit[]" value="' . esc_attr( $id ) . '">' : '' ) . '</td>';
+				echo '<td><a href="' . esc_url( get_permalink( $x['post'] ) ) . '" target="_blank">' . esc_html( $x['title'] ) . '</a><br><span style="color:#888;font-size:12px">' . esc_html( $x['where'] ) . '</span></td>';
+				echo '<td>' . esc_html( $x['value'] ) . '<br><span style="color:#888;font-size:12px">' . esc_html( $x['key'] ) . '</span></td>';
+				echo '<td>...' . wp_kses( $x['show'], array( 'mark' => array() ) ) . '...' . ( $x['ok'] ? '' : '<br><em style="color:#9a6700">This spot can\'t be changed automatically. Type the price tag in Elementor by hand.</em>' ) . '</td></tr>';
+			}
+			echo '</tbody></table>';
+			submit_button( 'Turn selected into price tags', 'secondary', 'tech_price_convert' );
+		}
+		echo '</form>';
 	}
 
 	/* ---------- Sticky phone bar (1.0.9) ---------- */
@@ -235,6 +491,10 @@ class Tech_Importer {
 			$this->print_log();
 		}
 
+		if ( isset( $_POST['tech_prices_save'] ) || isset( $_POST['tech_price_convert'] ) ) {
+			$this->price_post();
+		}
+
 		if ( isset( $_POST['cot_import'] ) ) {
 			check_admin_referer( 'cot_import_zip' );
 			$this->handle_upload();
@@ -254,6 +514,7 @@ class Tech_Importer {
 		echo '</form>';
 		$this->list_changes();
 		$this->list_imports();
+		$this->price_box();
 		$this->sticky_box();
 		echo '</div>';
 	}
@@ -1349,7 +1610,7 @@ class Tech_Importer {
 				} elseif ( preg_match( '/href="([^"]+)"/', $c['replace'], $hm ) ) {
 					$expect[] = 'href="' . $hm[1] . '"';
 				} else {
-					$expect[] = mb_substr( wp_strip_all_tags( $c['replace'] ), 0, 40 );
+					$expect[] = mb_substr( wp_strip_all_tags( $this->price_fill( $c['replace'] ) ), 0, 40 );
 				}
 				unset( $pending[ $c['id'] ] );
 			}
