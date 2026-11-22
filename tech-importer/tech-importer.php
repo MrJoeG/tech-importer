@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.11
+ * Version: 1.0.12
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.11';
+	const VERSION    = '1.0.12';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -757,6 +757,9 @@ class Tech_Importer {
 				'close'   => isset( $c['close'] ) ? (string) $c['close'] : '',
 				'add'     => isset( $c['add'] ) ? wp_kses_post( $c['add'] ) : '',
 				'marker'  => isset( $c['marker'] ) ? (string) $c['marker'] : '',
+				'before_heading' => isset( $c['before_heading'] ) ? array_map( 'sanitize_text_field', (array) $c['before_heading'] ) : array(),
+				'cut_rx'  => isset( $c['cut_rx'] ) ? (string) $c['cut_rx'] : '',
+				'gone'    => isset( $c['gone'] ) ? (string) $c['gone'] : '',
 			);
 			if ( 'insert' === $type ) {
 				$row['find'] = isset( $c['label'] ) ? sanitize_text_field( $c['label'] ) : 'New section';
@@ -837,6 +840,15 @@ class Tech_Importer {
 		if ( $cnt ) {
 			return str_replace( $c['find'], $c['replace'], $val );
 		}
+		if ( ! empty( $c['cut_rx'] ) ) {
+			/* 1.0.12: remove (or swap) a block the editor may have reformatted, matched by a pattern. */
+			$m = @preg_match_all( $c['cut_rx'], $val );
+			if ( 1 === $m ) {
+				$cnt = 1;
+				return preg_replace( $c['cut_rx'], $c['replace'], $val, 1 );
+			}
+			return $val;
+		}
 		if ( empty( $c['anchor'] ) || empty( $c['close'] ) || empty( $c['add'] ) ) {
 			return $val;
 		}
@@ -912,6 +924,54 @@ class Tech_Importer {
 				$this->heading_texts( $ch, $out );
 			}
 		}
+	}
+
+	/* 1.0.12: put $sec right before the heading widget whose text holds $want, at any depth. */
+	private function insert_before_heading( &$elements, $want, $sec, &$label ) {
+		foreach ( $elements as $i => &$el ) {
+			if ( ! is_array( $el ) ) {
+				continue;
+			}
+			if ( isset( $el['widgetType'] ) && 'heading' === $el['widgetType'] && ! empty( $el['settings']['title'] )
+				&& false !== stripos( wp_strip_all_tags( $el['settings']['title'] ), $want ) ) {
+				$label = 'right above the heading "' . wp_strip_all_tags( $el['settings']['title'] ) . '"';
+				if ( null !== $sec ) {
+					array_splice( $elements, $i, 0, array( $sec ) );
+				}
+				return true;
+			}
+			if ( ! empty( $el['elements'] ) && is_array( $el['elements'] ) ) {
+				if ( $this->insert_before_heading( $el['elements'], $want, $sec, $label ) ) {
+					return true;
+				}
+			}
+		}
+		return false;
+	}
+
+	/* Try each before_heading text in order. $sec null = dry run. */
+	private function place_nested( &$layout, $c, $sec, &$label ) {
+		foreach ( $c['before_heading'] as $want ) {
+			if ( $want && $this->insert_before_heading( $layout, $want, $sec, $label ) ) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	private function has_title_anywhere( $elements, $title ) {
+		foreach ( (array) $elements as $el ) {
+			if ( ! is_array( $el ) ) {
+				continue;
+			}
+			if ( isset( $el['settings']['_title'] ) && $el['settings']['_title'] === $title ) {
+				return true;
+			}
+			if ( ! empty( $el['elements'] ) && $this->has_title_anywhere( $el['elements'], $title ) ) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 	/* Index of the top-level section to insert after, or -1. Fills $label with where it was found. */
@@ -995,10 +1055,17 @@ class Tech_Importer {
 				return array( 'status' => 'err', 'post' => $post, 'msg' => 'This page is not built with Elementor, so a section can\'t be added here.' );
 			}
 			$title = isset( $c['section']['settings']['_title'] ) ? $c['section']['settings']['_title'] : '';
-			if ( $title && $this->has_section_title( $layout, $title ) ) {
+			if ( $title && ( $c['before_heading'] ? $this->has_title_anywhere( $layout, $title ) : $this->has_section_title( $layout, $title ) ) ) {
 				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'The "' . esc_html( $title ) . '" section is already on this page.' );
 			}
 			$label = '';
+			if ( $c['before_heading'] ) {
+				$tmp = $layout;
+				if ( ! $this->place_nested( $tmp, $c, null, $label ) ) {
+					return array( 'status' => 'err', 'post' => $post, 'msg' => 'Could not find the heading to place it above (looked for: ' . esc_html( implode( ', ', $c['before_heading'] ) ) . ').' );
+				}
+				return array( 'status' => 'ready', 'post' => $post, 'where' => array( 'insert', $label, '' ), 'layout' => $layout );
+			}
 			$i     = $this->insert_spot( $layout, $c, $label );
 			if ( $i < 0 ) {
 				return array( 'status' => 'err', 'post' => $post, 'msg' => 'Could not find the section to place it after (looked for: ' . esc_html( implode( ', ', array_merge( $c['after_section'], $c['after_heading'] ) ) ) . ').' );
@@ -1009,6 +1076,9 @@ class Tech_Importer {
 			$flat = wp_json_encode( $layout, JSON_UNESCAPED_SLASHES );
 			if ( ! empty( $c['marker'] ) && false !== strpos( $flat, $c['marker'] ) ) {
 				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This update is already on the page.' );
+			}
+			if ( ! empty( $c['gone'] ) && false === strpos( $flat, $c['gone'] ) ) {
+				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'Already removed from this page.' );
 			}
 			if ( 'link' === $c['type'] && ( false !== strpos( $flat, 'href=\"' . $c['url'] . '\"' ) || false !== strpos( $flat, 'href=\"' . home_url( $c['url'] ) . '\"' ) ) ) {
 				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This page already links to ' . esc_html( $c['url'] ) . '.' );
@@ -1072,7 +1142,8 @@ class Tech_Importer {
 					? 'Add the <strong>' . esc_html( $c['find'] ) . '</strong> section'
 					: ( 'link' === $c['type']
 					? 'Link <strong>"' . esc_html( $c['find'] ) . '"</strong> to <code>' . esc_html( $c['url'] ) . '</code>'
-					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>' );
+					: ( '' === $c['replace'] && $c['note'] ? 'Remove an old block'
+					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>' ) );
 				if ( $c['note'] ) {
 					$what .= '<br><small>' . esc_html( $c['note'] ) . '</small>';
 				}
@@ -1215,8 +1286,26 @@ class Tech_Importer {
 				$found = 0;
 				if ( 'insert' === $c['type'] ) {
 					$label = '';
-					$i     = $layout ? $this->insert_spot( $layout, $c, $label ) : -1;
 					$sec   = $c['section'];
+					if ( ! empty( $c['before_heading'] ) ) {
+						if ( ! $layout || ! $sec ) {
+							$problems[] = 'Could not place the "' . esc_html( $c['find'] ) . '" section';
+							continue;
+						}
+						$this->fresh_ids( $sec );
+						if ( ! $this->place_nested( $layout, $c, $sec, $label ) ) {
+							$problems[] = 'Could not find the heading to place the "' . esc_html( $c['find'] ) . '" section above';
+							continue;
+						}
+						$tmp    = array();
+						$added += $this->count_nodes( array( $sec ), $tmp );
+						$what[] = 'Added the "' . esc_html( $c['find'] ) . '" block ' . esc_html( $label );
+						$link   = $this->first_link( $sec );
+						$expect[] = $link ? $link : '';
+						unset( $pending[ $c['id'] ] );
+						continue;
+					}
+					$i     = $layout ? $this->insert_spot( $layout, $c, $label ) : -1;
 					if ( $i < 0 || ! $sec ) {
 						$problems[] = 'Could not place the "' . esc_html( $c['find'] ) . '" section';
 						continue;
@@ -1254,7 +1343,7 @@ class Tech_Importer {
 					$problems[] = 'The change to "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '" would leave broken HTML';
 					continue;
 				}
-				$what[]   = 'link' === $c['type'] ? 'Linked "' . esc_html( $c['find'] ) . '" to ' . esc_html( $c['url'] ) : 'Replaced "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"';
+				$what[]   = 'link' === $c['type'] ? 'Linked "' . esc_html( $c['find'] ) . '" to ' . esc_html( $c['url'] ) : ( '' === $c['replace'] && $c['note'] ? 'Removed: ' . esc_html( $c['note'] ) : 'Replaced "' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"' );
 				if ( 'link' === $c['type'] ) {
 					$expect[] = 'href="' . esc_url( $c['url'] ) . '"';
 				} elseif ( preg_match( '/href="([^"]+)"/', $c['replace'], $hm ) ) {
