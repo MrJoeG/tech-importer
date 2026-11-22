@@ -24,44 +24,46 @@ class Tech_Importer {
 		add_filter( 'plugins_api', array( $this, 'plugin_info' ), 20, 3 );
 		add_action( 'upgrader_process_complete', array( $this, 'clear_update_cache' ) );
 		add_action( 'wp_footer', array( $this, 'sticky_bar' ) );
-		add_shortcode( 'cot_price', array( $this, 'price_sc' ) );
+		add_shortcode( 'tech_price', array( $this, 'price_sc' ) );
 		add_filter( 'elementor/frontend/the_content', array( $this, 'price_fill' ), 20 );
 		add_filter( 'widget_text', array( $this, 'price_fill' ), 20 );
 	}
 
 	/* ---------- Price list (1.0.13) ---------- */
 
-	private function price_defaults() {
-		return array(
-			'seo'           => array( 'Local SEO plans, from (per month)', '$499' ),
-			'care'          => array( 'Website care plan, from (per month, 12-month plan)', '$199' ),
-			'care_6'        => array( 'Website care plan, 6-month plan (per month)', '$249' ),
-			'care_1'        => array( 'Website care plan, 1 month', '$399' ),
-			'care_6_total'  => array( 'Website care plan, 6-month total', '$1,494' ),
-			'care_12_total' => array( 'Website care plan, 12-month total', '$2,388' ),
-			'care_setup'    => array( 'Care plan setup fee', '$299' ),
-			'hourly'        => array( 'Extra edits, per hour', '$75' ),
-			'build_starter' => array( 'Website build, Starter from', '$2,500' ),
-			'build_growth'  => array( 'Website build, Growth from', '$4,600' ),
-			'build_custom'  => array( 'Custom build or online store, around', '$7,000' ),
-		);
+	/* 1.0.13: a zip can carry a "prices" list: { "key": ["What it is", "$123"] }. Only keys not in the list yet are added, so prices you changed by hand are kept. */
+	private function import_prices( $list ) {
+		$have = $this->prices();
+		$n    = 0;
+		foreach ( $list as $k => $row ) {
+			$k = sanitize_key( $k );
+			if ( '' === $k || isset( $have[ $k ] ) || ! is_array( $row ) || count( $row ) < 2 ) {
+				continue;
+			}
+			$have[ $k ] = array( sanitize_text_field( $row[0] ), sanitize_text_field( $row[1] ) );
+			$n++;
+		}
+		if ( $n ) {
+			update_option( 'tech_prices', $have );
+		}
+		$this->note( 'ok', $n ? '<strong>' . $n . ' prices added</strong> to the Prices list below.' : 'Every price in this zip was already in the Prices list, nothing changed.' );
 	}
 
 	private function prices() {
 		$p = get_option( 'tech_prices' );
-		return is_array( $p ) && $p ? $p : $this->price_defaults();
+		return is_array( $p ) ? $p : array();
 	}
 
 	public function price_sc( $atts ) {
-		$a = shortcode_atts( array( 'key' => '' ), $atts, 'cot_price' );
+		$a = shortcode_atts( array( 'key' => '' ), $atts, 'tech_price' );
 		$p = $this->prices();
 		$k = sanitize_key( $a['key'] );
 		return isset( $p[ $k ] ) ? esc_html( $p[ $k ][1] ) : '';
 	}
 
 	public function price_fill( $html ) {
-		if ( is_string( $html ) && false !== strpos( $html, '[cot_price' ) ) {
-			$html = preg_replace_callback( '/\[cot_price\s+key=(?:"|&quot;|&#8221;|&#8243;|\')?([a-z0-9_]+)(?:"|&quot;|&#8221;|&#8243;|\')?\s*\]/i', function ( $m ) {
+		if ( is_string( $html ) && false !== strpos( $html, '[tech_price' ) ) {
+			$html = preg_replace_callback( '/\[tech_price\s+key=(?:"|&quot;|&#8221;|&#8243;|\')?([a-z0-9_]+)(?:"|&quot;|&#8221;|&#8243;|\')?\s*\]/i', function ( $m ) {
 				return $this->price_sc( array( 'key' => $m[1] ) );
 			}, $html );
 		}
@@ -69,7 +71,7 @@ class Tech_Importer {
 	}
 
 	private function price_tag( $key ) {
-		return '[cot_price key="' . $key . '"]';
+		return '[tech_price key="' . $key . '"]';
 	}
 
 	private function price_posts() {
@@ -111,7 +113,7 @@ class Tech_Importer {
 				}
 				continue;
 			}
-			if ( is_string( $val ) && false !== strpos( $val, '$' ) || ( is_string( $val ) && false !== strpos( $val, '[cot_price' ) ) ) {
+			if ( is_string( $val ) && false !== strpos( $val, '$' ) || ( is_string( $val ) && false !== strpos( $val, '[tech_price' ) ) ) {
 				$fn( $id, $wt, (string) $key, $val );
 			}
 		}
@@ -130,11 +132,11 @@ class Tech_Importer {
 				$this->price_walk( $layout, function ( $id, $wt, $key, $val ) use ( &$fields ) {
 					$fields[] = array( $id, $wt, $key, $val );
 				} );
-			} elseif ( false !== strpos( $post->post_content, '$' ) || false !== strpos( $post->post_content, '[cot_price' ) ) {
+			} elseif ( false !== strpos( $post->post_content, '$' ) || false !== strpos( $post->post_content, '[tech_price' ) ) {
 				$fields[] = array( '', 'page content', 'content', $post->post_content );
 			}
 			foreach ( $fields as $f ) {
-				if ( preg_match_all( '/\[cot_price\s+key=["\']?([a-z0-9_]+)/i', $f[3], $m ) ) {
+				if ( preg_match_all( '/\[tech_price\s+key=["\']?([a-z0-9_]+)/i', $f[3], $m ) ) {
 					foreach ( $m[1] as $k ) {
 						$used[ strtolower( $k ) ][ $pid ] = true;
 					}
@@ -246,7 +248,7 @@ class Tech_Importer {
 		set_transient( 'tech_price_hits', $hits, DAY_IN_SECONDS );
 
 		echo '<h2 style="margin-top:30px">Prices</h2>';
-		echo '<p>Change a price here and every page that uses its price tag updates by itself. In Elementor, type the tag instead of the price, for example <code>' . esc_html( $this->price_tag( 'seo' ) ) . '</code> shows ' . esc_html( isset( $prices['seo'] ) ? $prices['seo'][1] : '' ) . '. Yoast titles, meta descriptions and prices inside images are not covered, change those by hand.</p>';
+		echo '<p>Change a price here and every page that uses its price tag updates by itself. In Elementor, type the tag instead of the price, for example <code>' . esc_html( $this->price_tag( $prices ? key( $prices ) : 'basic' ) ) . '</code>' . ( $prices ? ' shows ' . esc_html( reset( $prices )[1] ) : '' ) . '. Yoast titles, meta descriptions and prices inside images are not covered, change those by hand.</p>';
 		echo '<form method="post">';
 		wp_nonce_field( 'tech_prices' );
 		echo '<table class="widefat striped" style="max-width:1000px"><thead><tr><th>Price tag</th><th>What it is</th><th>Price</th><th>Used on</th></tr></thead><tbody>';
@@ -648,6 +650,13 @@ class Tech_Importer {
 			return;
 		}
 		$manifest = json_decode( file_get_contents( $root . '/manifest.json' ), true );
+		if ( is_array( $manifest ) && ! empty( $manifest['prices'] ) && is_array( $manifest['prices'] ) ) {
+			$this->import_prices( $manifest['prices'] );
+		}
+		if ( is_array( $manifest ) && empty( $manifest['items'] ) && empty( $manifest['changes'] ) && ! empty( $manifest['prices'] ) ) {
+			$this->cleanup( $dir );
+			return;
+		}
 		if ( ! is_array( $manifest ) || ( empty( $manifest['items'] ) && empty( $manifest['changes'] ) ) ) {
 			$this->note( 'err', 'manifest.json is empty or not valid JSON.' );
 			$this->cleanup( $dir );
