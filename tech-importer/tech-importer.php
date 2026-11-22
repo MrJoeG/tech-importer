@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.13
+ * Version: 1.0.14
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.13';
+	const VERSION    = '1.0.14';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -27,6 +27,49 @@ class Tech_Importer {
 		add_shortcode( 'tech_price', array( $this, 'price_sc' ) );
 		add_filter( 'elementor/frontend/the_content', array( $this, 'price_fill' ), 20 );
 		add_filter( 'widget_text', array( $this, 'price_fill' ), 20 );
+	}
+
+	/* ---------- Paging for long lists (1.0.14) ---------- */
+
+	private function pager( $key, $total ) {
+		$n = isset( $_GET[ 'tn_' . $key ] ) ? sanitize_key( wp_unslash( $_GET[ 'tn_' . $key ] ) ) : '10';
+		if ( ! in_array( $n, array( '10', '30', 'all' ), true ) ) {
+			$n = '10';
+		}
+		$per   = 'all' === $n ? max( 1, $total ) : (int) $n;
+		$pages = max( 1, (int) ceil( $total / $per ) );
+		$pg    = isset( $_GET[ 'tp_' . $key ] ) ? (int) $_GET[ 'tp_' . $key ] : 1;
+		$pg    = max( 1, min( $pages, $pg ) );
+		return array( 'key' => $key, 'total' => $total, 'n' => $n, 'per' => $per, 'page' => $pg, 'pages' => $pages, 'offset' => ( $pg - 1 ) * $per );
+	}
+
+	private function pager_url( $key, $n, $pg ) {
+		$url = remove_query_arg( array( 'force-check' ) );
+		return add_query_arg( array( 'tn_' . $key => $n, 'tp_' . $key => $pg ), $url ) . '#tech-' . $key;
+	}
+
+	private function pager_nav( $st ) {
+		if ( $st['total'] <= 10 ) {
+			return;
+		}
+		$k     = $st['key'];
+		$links = array();
+		foreach ( array( '10' => '10', '30' => '30', 'all' => 'All' ) as $v => $label ) {
+			$links[] = (string) $v === $st['n'] ? '<strong>' . $label . '</strong>' : '<a href="' . esc_url( $this->pager_url( $k, (string) $v, 1 ) ) . '">' . $label . '</a>';
+		}
+		$from = $st['offset'] + 1;
+		$to   = min( $st['total'], $st['offset'] + $st['per'] );
+		echo '<div style="display:flex;flex-wrap:wrap;gap:18px;align-items:center;max-width:1100px;margin:10px 0">';
+		echo '<span>Show: ' . implode( ' &middot; ', $links ) . '</span>';
+		echo '<span style="color:#666">' . (int) $from . '&ndash;' . (int) $to . ' of ' . (int) $st['total'] . '</span>';
+		if ( $st['pages'] > 1 ) {
+			echo '<span>';
+			echo $st['page'] > 1 ? '<a class="button" href="' . esc_url( $this->pager_url( $k, $st['n'], $st['page'] - 1 ) ) . '">&lsaquo; Previous</a> ' : '';
+			echo ' Page ' . (int) $st['page'] . ' of ' . (int) $st['pages'] . ' ';
+			echo $st['page'] < $st['pages'] ? ' <a class="button" href="' . esc_url( $this->pager_url( $k, $st['n'], $st['page'] + 1 ) ) . '">Next &rsaquo;</a>' : '';
+			echo '</span>';
+		}
+		echo '</div>';
 	}
 
 	/* ---------- Price list (1.0.13) ---------- */
@@ -162,7 +205,7 @@ class Tech_Importer {
 							'full'    => $f[3],
 							'off'     => $off,
 							'ok'      => '' === $f[0] || in_array( $f[2], $this->text_fields(), true ),
-							'show'    => wp_strip_all_tags( substr( $ctx, 0, $rel ) ) . '<mark>' . $row[1] . '</mark>' . wp_strip_all_tags( substr( $ctx, $rel + strlen( $row[1] ) ) ),
+							'show'    => esc_html( strip_tags( substr( $ctx, 0, $rel ) ) ) . '<mark>' . esc_html( $row[1] ) . '</mark>' . esc_html( strip_tags( substr( $ctx, $rel + strlen( $row[1] ) ) ) ),
 						);
 					}
 				}
@@ -266,19 +309,22 @@ class Tech_Importer {
 		echo '</tbody></table><p class="description">To remove a price, clear its Price box and save. Add a new one in the empty last row (lowercase letters, numbers and underscores).</p>';
 		submit_button( 'Save prices', 'primary', 'tech_prices_save' );
 
-		echo '<h3>Prices still typed out on pages</h3>';
+		echo '<h3 id="tech-typed">Prices still typed out on pages</h3>';
 		if ( ! $hits ) {
 			echo '<p>None found. Every price on the site uses a price tag.</p>';
 		} else {
 			echo '<p>These match a price in the list above but are typed as plain text, so they won\'t change with the list. Tick the ones that are <strong>your</strong> prices (leave market ranges in guides alone), then click the button. They go to "Updates to existing pages" for the usual preview, Apply and Undo.</p>';
-			echo '<table class="widefat striped" style="max-width:1000px"><thead><tr><th></th><th>Page</th><th>Price</th><th>Text around it</th></tr></thead><tbody>';
-			foreach ( $hits as $id => $x ) {
+			$st = $this->pager( 'typed', count( $hits ) );
+			$this->pager_nav( $st );
+			echo '<table class="widefat striped" style="max-width:1000px"><thead><tr><th><input type="checkbox" title="Tick all on this page" onclick="var c=this.checked;this.closest(\'table\').querySelectorAll(\'input[name^=tp_hit]\').forEach(function(b){b.checked=c;});"></th><th>Page</th><th>Price</th><th>Text around it</th></tr></thead><tbody>';
+			foreach ( array_slice( $hits, $st['offset'], $st['per'], true ) as $id => $x ) {
 				echo '<tr><td>' . ( $x['ok'] ? '<input type="checkbox" name="tp_hit[]" value="' . esc_attr( $id ) . '">' : '' ) . '</td>';
 				echo '<td><a href="' . esc_url( get_permalink( $x['post'] ) ) . '" target="_blank">' . esc_html( $x['title'] ) . '</a><br><span style="color:#888;font-size:12px">' . esc_html( $x['where'] ) . '</span></td>';
 				echo '<td>' . esc_html( $x['value'] ) . '<br><span style="color:#888;font-size:12px">' . esc_html( $x['key'] ) . '</span></td>';
 				echo '<td>...' . wp_kses( $x['show'], array( 'mark' => array() ) ) . '...' . ( $x['ok'] ? '' : '<br><em style="color:#9a6700">This spot can\'t be changed automatically. Type the price tag in Elementor by hand.</em>' ) . '</td></tr>';
 			}
 			echo '</tbody></table>';
+			$this->pager_nav( $st );
 			submit_button( 'Turn selected into price tags', 'secondary', 'tech_price_convert' );
 		}
 		echo '</form>';
@@ -557,14 +603,20 @@ class Tech_Importer {
 
 	private function list_imports() {
 		$ids = $this->imported_ids();
-		echo '<h2 style="margin-top:30px">Imported content</h2>';
+		echo '<h2 style="margin-top:30px" id="tech-imports">Imported content</h2>';
+		$ids = array_values( array_filter( (array) $ids, function ( $id ) {
+			$p = get_post( $id );
+			return $p && 'trash' !== $p->post_status;
+		} ) );
 		if ( ! $ids ) {
 			echo '<p>Nothing imported yet.</p>';
 			return;
 		}
 		echo '<p>Publish puts the draft live and clears the WP Rocket cache. Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
+		$st = $this->pager( 'imports', count( $ids ) );
+		$this->pager_nav( $st );
 		echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Published date</th><th>Published time</th><th>Images</th><th></th></tr></thead><tbody>';
-		foreach ( $ids as $id ) {
+		foreach ( array_slice( $ids, $st['offset'], $st['per'] ) as $id ) {
 			$p = get_post( $id );
 			if ( ! $p || 'trash' === $p->post_status ) {
 				continue;
@@ -590,6 +642,7 @@ class Tech_Importer {
 			echo '</td></tr>';
 		}
 		echo '</tbody></table>';
+		$this->pager_nav( $st );
 	}
 
 	private function item_images( $id ) {
@@ -1434,16 +1487,21 @@ class Tech_Importer {
 			echo '<button class="button" name="tech_discard_changes" value="1">Discard all</button></p></form>';
 		}
 		if ( $log ) {
-			echo '<h3>Applied updates</h3><form method="post">';
+			$rows = array_reverse( $log, true );
+			$st   = $this->pager( 'applied', count( $rows ) );
+			echo '<h3 id="tech-applied">Applied updates</h3>';
+			$this->pager_nav( $st );
+			echo '<form method="post">';
 			wp_nonce_field( 'tech_changes' );
 			echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th>When</th><th>Page</th><th>What changed</th><th>Check</th><th></th></tr></thead><tbody>';
-			foreach ( array_reverse( $log, true ) as $key => $row ) {
+			foreach ( array_slice( $rows, $st['offset'], $st['per'], true ) as $key => $row ) {
 				echo '<tr><td>' . esc_html( $row['time'] ) . '</td><td><a href="' . esc_url( get_permalink( $row['post'] ) ) . '" target="_blank">' . esc_html( get_the_title( $row['post'] ) ) . '</a></td>';
 				echo '<td>' . wp_kses_post( implode( '<br>', $row['what'] ) ) . '</td><td>' . wp_kses_post( $row['check'] ) . '</td><td>';
 				echo ! empty( $row['undone'] ) ? '<em>Undone</em>' : '<button class="button" name="tech_undo" value="' . esc_attr( $key ) . '" onclick="return confirm(\'Put this page back the way it was before this update?\');">Undo</button>';
 				echo '</td></tr>';
 			}
 			echo '</tbody></table></form>';
+			$this->pager_nav( $st );
 		}
 	}
 
