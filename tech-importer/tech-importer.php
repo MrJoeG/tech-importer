@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.15
+ * Version: 1.0.16
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.15';
+	const VERSION    = '1.0.16';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -525,9 +525,22 @@ class Tech_Importer {
 		$this->update_box();
 		echo '<p>Upload the zip from Claude. Everything comes in as a <strong>draft</strong>. Nothing is published.</p>';
 
-		if ( isset( $_POST['tech_remove'] ) || isset( $_POST['tech_publish'] ) ) {
+		if ( isset( $_POST['tech_remove'] ) || isset( $_POST['tech_publish'] ) || isset( $_POST['tech_publish_bulk'] ) ) {
 			check_admin_referer( 'tech_remove_item' );
-			if ( isset( $_POST['tech_publish'] ) ) {
+			if ( isset( $_POST['tech_publish_bulk'] ) ) {
+				/* 1.0.16: publish several drafts at once, caches cleared once at the end */
+				$pick = isset( $_POST['tech_pick'] ) ? array_map( 'intval', (array) wp_unslash( $_POST['tech_pick'] ) ) : array();
+				if ( ! $pick ) {
+					$this->note( 'err', 'Tick at least one draft to publish.' );
+				}
+				foreach ( $pick as $pid ) {
+					$this->publish_item( $pid, false );
+				}
+				if ( $pick ) {
+					$this->clear_caches();
+					$this->note( 'ok', 'Caches cleared once for all ' . count( $pick ) . ' items. Next: request indexing in Search Console for each new URL.' );
+				}
+			} elseif ( isset( $_POST['tech_publish'] ) ) {
 				$this->publish_item( (int) $_POST['tech_publish'] );
 			} else {
 				$this->remove_item( (int) $_POST['tech_remove'] );
@@ -642,17 +655,21 @@ class Tech_Importer {
 			echo '<p>Nothing imported yet.</p>';
 			return;
 		}
-		echo '<p>Publish puts the draft live and clears the WP Rocket cache. Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
+		echo '<p>Publish puts the draft live and clears the WP Rocket cache. Publish selected does the same for every ticked draft in one go. Remove deletes the draft and the images that came in with it. Published items can\'t be removed here.</p>';
 		$st = $this->pager( 'imports', count( $ids ) );
 		$this->pager_nav( $st );
-		echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th>Title</th><th>Type</th><th>Status</th><th>Published date</th><th>Published time</th><th>Images</th><th></th></tr></thead><tbody>';
+		echo '<form method="post" id="tech-bulk" style="margin:8px 0">';
+		wp_nonce_field( 'tech_remove_item' );
+		echo '<button class="button button-primary" name="tech_publish_bulk" value="1" onclick="var n=document.querySelectorAll(\'.tech-pick:checked\').length;if(!n){alert(\'Tick the drafts you want to publish first.\');return false;}return confirm(\'Publish \'+n+\' item(s) now? They go live on your site.\');">Publish selected</button> <span class="description">Tick drafts in the first column, or the top box to tick every draft on this page.</span></form>';
+		echo '<table class="widefat striped" style="max-width:1100px"><thead><tr><th style="width:28px"><input type="checkbox" title="Tick all drafts on this page" onclick="document.querySelectorAll(\'.tech-pick\').forEach(function(c){c.checked=this.checked}.bind(this))"></th><th>Title</th><th>Type</th><th>Status</th><th>Published date</th><th>Published time</th><th>Images</th><th></th></tr></thead><tbody>';
 		foreach ( array_slice( $ids, $st['offset'], $st['per'] ) as $id ) {
 			$p = get_post( $id );
 			if ( ! $p || 'trash' === $p->post_status ) {
 				continue;
 			}
 			$imgs = count( $this->item_images( $id ) );
-			echo '<tr><td><a href="' . esc_url( get_edit_post_link( $id ) ) . '">' . esc_html( $p->post_title ) . '</a><br><small>/' . esc_html( $p->post_name ) . '/</small></td>';
+			$can_pick = ! in_array( $p->post_status, array( 'publish', 'future' ), true );
+			echo '<tr><td>' . ( $can_pick ? '<input type="checkbox" class="tech-pick" form="tech-bulk" name="tech_pick[]" value="' . (int) $id . '">' : '' ) . '</td><td><a href="' . esc_url( get_edit_post_link( $id ) ) . '">' . esc_html( $p->post_title ) . '</a><br><small>/' . esc_html( $p->post_name ) . '/</small></td>';
 			$live = in_array( $p->post_status, array( 'publish', 'future' ), true );
 			$date = $live ? get_the_date( 'M j, Y', $p ) : '&mdash;';
 			$time = $live ? get_the_time( 'g:i a', $p ) : '&mdash;';
@@ -900,7 +917,16 @@ class Tech_Importer {
 		return $out;
 	}
 
-	private function publish_item( $id ) {
+	private function clear_caches() {
+		if ( class_exists( '\Elementor\Plugin' ) ) {
+			\Elementor\Plugin::$instance->files_manager->clear_cache();
+		}
+		if ( function_exists( 'rocket_clean_domain' ) ) {
+			rocket_clean_domain();
+		}
+	}
+
+	private function publish_item( $id, $clear = true ) {
 		$p = get_post( $id );
 		if ( ! $p || ! in_array( $id, $this->imported_ids(), true ) || ! current_user_can( 'publish_post', $id ) ) {
 			$this->note( 'err', 'That item was not found or you cannot publish it.' );
@@ -911,13 +937,12 @@ class Tech_Importer {
 			$this->note( 'err', 'Could not publish: ' . esc_html( $res->get_error_message() ) );
 			return;
 		}
-		if ( class_exists( '\Elementor\Plugin' ) ) {
-			\Elementor\Plugin::$instance->files_manager->clear_cache();
-		}
-		if ( function_exists( 'rocket_clean_domain' ) ) {
-			rocket_clean_domain();
-		}
 		$url = get_permalink( $id );
+		if ( ! $clear ) {
+			$this->note( 'ok', 'Published: <a href="' . esc_url( $url ) . '" target="_blank">' . esc_html( $url ) . '</a>' );
+			return;
+		}
+		$this->clear_caches();
 		$this->note( 'ok', 'Published: <a href="' . esc_url( $url ) . '" target="_blank">' . esc_html( $url ) . '</a> (WP Rocket cache cleared). Next: request indexing in Search Console and scrape it in the Facebook Sharing Debugger.' );
 	}
 
