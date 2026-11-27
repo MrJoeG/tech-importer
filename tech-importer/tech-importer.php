@@ -2,7 +2,7 @@
 /**
  * Plugin Name: Tech Importer
  * Description: Upload a content zip from Claude. Creates draft pages and posts with Elementor layout, Yoast fields, images and featured image, and applies reviewed link and text updates to existing pages.
- * Version: 1.0.16
+ * Version: 1.0.17
  * Update URI: https://github.com/MrJoeG/tech-importer
  * Author: Capital of Techs
  */
@@ -14,7 +14,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 class Tech_Importer {
 
 	const SLUG       = 'tech-importer';
-	const VERSION    = '1.0.16';
+	const VERSION    = '1.0.17';
 	const UPDATE_URL = 'https://raw.githubusercontent.com/MrJoeG/tech-importer/main/update.json';
 	private $log = array();
 
@@ -1119,7 +1119,7 @@ class Tech_Importer {
 				$this->note( 'err', 'An update in the zip is missing its page or text, skipped.' );
 				continue;
 			}
-			$type = ( isset( $c['type'] ) && in_array( $c['type'], array( 'replace', 'insert' ), true ) ) ? $c['type'] : 'link';
+			$type = ( isset( $c['type'] ) && in_array( $c['type'], array( 'replace', 'insert', 'swap' ), true ) ) ? $c['type'] : 'link';
 			$row  = array(
 				'id'      => substr( md5( wp_json_encode( $c ) . microtime() . $n ), 0, 10 ),
 				'batch'   => sanitize_text_field( $batch ),
@@ -1140,8 +1140,10 @@ class Tech_Importer {
 				'before_heading' => isset( $c['before_heading'] ) ? array_map( 'sanitize_text_field', (array) $c['before_heading'] ) : array(),
 				'cut_rx'  => isset( $c['cut_rx'] ) ? (string) $c['cut_rx'] : '',
 				'gone'    => isset( $c['gone'] ) ? (string) $c['gone'] : '',
+				'swap_title'   => isset( $c['swap_title'] ) ? array_map( 'sanitize_text_field', (array) $c['swap_title'] ) : array(),
+				'swap_heading' => isset( $c['swap_heading'] ) ? array_map( 'sanitize_text_field', (array) $c['swap_heading'] ) : array(),
 			);
-			if ( 'insert' === $type ) {
+			if ( 'insert' === $type || 'swap' === $type ) {
 				$row['find'] = isset( $c['label'] ) ? sanitize_text_field( $c['label'] ) : 'New section';
 			}
 			if ( 'link' === $type && '' === $row['url'] ) {
@@ -1381,6 +1383,32 @@ class Tech_Importer {
 	}
 
 
+	/* 1.0.17: find the top-level section to swap out, by its Navigator name or a heading inside it. */
+	private function swap_spot( $layout, $c, &$label ) {
+		foreach ( (array) $c['swap_title'] as $want ) {
+			foreach ( $layout as $i => $el ) {
+				$t = isset( $el['settings']['_title'] ) ? $el['settings']['_title'] : '';
+				if ( $t && 0 === strcasecmp( trim( $t ), trim( $want ) ) ) {
+					$label = 'the "' . $t . '" section';
+					return $i;
+				}
+			}
+		}
+		foreach ( (array) $c['swap_heading'] as $want ) {
+			foreach ( $layout as $i => $el ) {
+				$hs = array();
+				$this->heading_texts( $el, $hs );
+				foreach ( $hs as $h ) {
+					if ( $want && false !== stripos( $h, $want ) ) {
+						$label = 'the section with the heading "' . $h . '"';
+						return $i;
+					}
+				}
+			}
+		}
+		return -1;
+	}
+
 	private function first_link( $el ) {
 		if ( ! empty( $el['settings']['link']['url'] ) ) {
 			return $el['settings']['link']['url'];
@@ -1430,6 +1458,19 @@ class Tech_Importer {
 		$layout = $this->get_layout( $post );
 		$where  = array();
 		$found  = 0;
+		if ( 'swap' === $c['type'] ) {
+			if ( ! $layout ) {
+				return array( 'status' => 'err', 'post' => $post, 'msg' => 'This page is not built with Elementor, so the section can\'t be swapped.' );
+			}
+			if ( ! empty( $c['marker'] ) && false !== strpos( wp_json_encode( $layout, JSON_UNESCAPED_SLASHES ), $c['marker'] ) ) {
+				return array( 'status' => 'skip', 'post' => $post, 'msg' => 'This update is already on the page.' );
+			}
+			$label = '';
+			if ( $this->swap_spot( $layout, $c, $label ) < 0 ) {
+				return array( 'status' => 'err', 'post' => $post, 'msg' => 'Could not find the section to swap (looked for: ' . esc_html( implode( ', ', array_merge( (array) $c['swap_title'], (array) $c['swap_heading'] ) ) ) . ').' );
+			}
+			return array( 'status' => 'ready', 'post' => $post, 'where' => array( 'swap', $label, '' ), 'layout' => $layout );
+		}
 		if ( 'insert' === $c['type'] ) {
 			if ( ! $layout ) {
 				return array( 'status' => 'err', 'post' => $post, 'msg' => 'This page is not built with Elementor, so a section can\'t be added here.' );
@@ -1518,18 +1559,22 @@ class Tech_Importer {
 				$r     = $this->check_change( $c );
 				$ready = 'ready' === $r['status'];
 				$title = ! empty( $r['post'] ) ? $r['post']->post_title : $c['page'];
-				$what  = 'insert' === $c['type']
+				$what  = 'swap' === $c['type']
+					? 'Swap in the new <strong>' . esc_html( $c['find'] ) . '</strong> section'
+					: ( 'insert' === $c['type']
 					? 'Add the <strong>' . esc_html( $c['find'] ) . '</strong> section'
 					: ( 'link' === $c['type']
 					? 'Link <strong>"' . esc_html( $c['find'] ) . '"</strong> to <code>' . esc_html( $c['url'] ) . '</code>'
 					: ( '' === $c['replace'] && $c['note'] ? 'Remove an old block'
-					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>' ) );
+					: 'Replace <strong>"' . esc_html( wp_strip_all_tags( $c['find'] ) ) . '"</strong> with <strong>"' . esc_html( wp_strip_all_tags( $c['replace'] ) ) . '"</strong>' ) ) );
 				if ( $c['note'] ) {
 					$what .= '<br><small>' . esc_html( $c['note'] ) . '</small>';
 				}
 				echo '<tr><td>' . ( $ready ? '<input type="checkbox" name="tech_change[]" value="' . esc_attr( $c['id'] ) . '" checked>' : '' ) . '</td>';
 				echo '<td>' . esc_html( $title ) . '<br><small>/' . esc_html( trim( $c['page'], '/' ) ) . '/</small></td><td>' . $what . '</td><td>';
-				if ( $ready && 'insert' === $c['type'] ) {
+				if ( $ready && 'swap' === $c['type'] ) {
+					echo 'Replaces ' . esc_html( $r['where'][1] ) . '.';
+				} elseif ( $ready && 'insert' === $c['type'] ) {
 					echo 'Goes in ' . esc_html( $r['where'][1] ) . '.' . ( $c['note'] ? '' : '' );
 				} elseif ( $ready ) {
 					echo '<small style="color:#666">' . esc_html( $r['where'][0] ) . '</small><br>' . $this->snippet( $r['where'][1], $r['where'][2] );
@@ -1665,10 +1710,33 @@ class Tech_Importer {
 			$problems    = array();
 			$expect      = array();
 
-			$added = 0;
+			$added   = 0;
+			$removed = 0;
+			$gone_ids = array();
 			foreach ( $changes as $c ) {
 				$where = array();
 				$found = 0;
+				if ( 'swap' === $c['type'] ) {
+					$label = '';
+					$sec   = $c['section'];
+					$i     = $layout ? $this->swap_spot( $layout, $c, $label ) : -1;
+					if ( $i < 0 || ! $sec ) {
+						$problems[] = 'Could not find the section to swap for "' . esc_html( $c['find'] ) . '"';
+						continue;
+					}
+					$this->fresh_ids( $sec );
+					$old_ids  = array();
+					$removed += $this->count_nodes( array( $layout[ $i ] ), $old_ids );
+					$gone_ids = array_merge( $gone_ids, $old_ids );
+					$tmp      = array();
+					$added   += $this->count_nodes( array( $sec ), $tmp );
+					$layout[ $i ] = $sec;
+					$what[]   = 'Swapped ' . esc_html( $label ) . ' for the new "' . esc_html( $c['find'] ) . '" section';
+					$link     = $this->first_link( $sec );
+					$expect[] = $link ? $link : '';
+					unset( $pending[ $c['id'] ] );
+					continue;
+				}
 				if ( 'insert' === $c['type'] ) {
 					$label = '';
 					$sec   = $c['section'];
@@ -1750,7 +1818,7 @@ class Tech_Importer {
 				$ids1   = array();
 				$nodes1 = $this->count_nodes( $layout, $ids1 );
 				$json   = wp_json_encode( $layout );
-				if ( $nodes1 !== $nodes0 + $added || array_diff( $ids0, $ids1 ) || ! is_array( json_decode( $json, true ) ) ) {
+				if ( $nodes1 !== $nodes0 + $added - $removed || array_diff( $ids0, $ids1, $gone_ids ) || ! is_array( json_decode( $json, true ) ) ) {
 					$this->note( 'err', esc_html( $post->post_title ) . ': layout check failed (sections or widgets would change). This page was not changed.' );
 					foreach ( $changes as $c ) {
 						$pending[ $c['id'] ] = $c;
